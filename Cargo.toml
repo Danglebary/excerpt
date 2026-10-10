@@ -1,0 +1,107 @@
+[package]
+name = "excerpt"
+version = "0.1.0"
+edition = "2024"
+# The least compiler the crate is built with, the stable release `rust-toolchain.toml`
+# pins rather than the floor a dependency declares.
+rust-version = "1.99"
+description = "Prints a source file's outline, or one of its items whole by name, so a reader never guesses a line range"
+license = "MIT"
+repository = "https://github.com/Danglebary/excerpt"
+
+[dependencies]
+# ripgrep's directory walker, which skips what `.gitignore` and hidden paths name the way
+# git does; reimplementing those rules is the part a hand-rolled walk gets wrong.
+ignore = "0.4.33"
+# The parser and its grammars. A grammar is C that cargo compiles into the binary, so a
+# language costs build time and binary size, and only languages measured in use are in.
+tree-sitter = "0.27.1"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+
+# Criterion's default features add rayon and plotters, which parallelize its analysis
+# and draw its charts; the benches read neither, so only its cargo harness is taken.
+[dev-dependencies]
+criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
+serde_json = "1.0.152"
+
+# The library's and the binary's unit tests run under libtest, which refuses criterion's
+# options such as `--save-baseline`; with `bench` off for both, `cargo bench` runs the
+# criterion benches alone and hands those options to them.
+[lib]
+bench = false
+
+[[bin]]
+name = "excerpt"
+path = "src/main.rs"
+bench = false
+
+[[bench]]
+name = "outline"
+harness = false
+
+[[bench]]
+name = "process"
+harness = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# A programmer error crashes, and it crashes through `assert!` or `unreachable!` with
+# a message at the site, so a failure names what it found rather than where it fell:
+# `unwrap`, `expect`, and a bare `panic!` are denied, and so are the implicit panics of
+# indexing, slicing, and arithmetic, which carry no message.
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+arithmetic_side_effects = "deny"
+unimplemented = "deny"
+unchecked_time_subtraction = "deny"
+todo = "deny"
+string_slice = "deny"
+panic = "deny"
+exit = "deny"
+as_conversions = "deny"
+# An invariant a let-else cannot hold is stated as an unreachable arm.
+unreachable = "allow"
+# The lint flags every assertion in a function returning a result, and a programmer
+# error there crashes rather than becoming an error its caller handles.
+panic_in_result_fn = "allow"
+# The lint asks for the panic's message to be matched, which is an assertion on prose;
+# the fixture isolating one assertion is what makes the bare attribute fail for one
+# reason.
+should_panic_without_expect = "allow"
+# The lint rewrites an explicit match into a combinator over closures, which puts
+# both branches and their bindings in one expression a reader has to unwind.
+option_if_let_else = "allow"
+# A compound condition is written as nested `if`s so each half can carry its own
+# `else` and a failure names which half broke; the collapse this lint asks for fuses
+# them back into one condition.
+collapsible_if = "allow"
+
+# The release profile is stated in full rather than left to cargo's defaults, so the
+# binary's shape reads from here. `strip` drops symbols and debug info from the
+# binary; `lto = "thin"` inlines across crates at a fraction of fat LTO's cost;
+# `codegen-units = 1` hands LTO the whole program as one unit; `panic = "abort"` ends
+# the process at a failed assertion rather than unwinding, which is what lets a
+# production `assert!` be the default: an unwind runs destructors over state the
+# assertion has just found corrupt. `overflow-checks` crashes an overflow the
+# arithmetic lint did not reach, where release would otherwise wrap it silently.
+[profile.release]
+strip = true
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+
+# The profiling profile is the release binary with its symbols and line tables kept, so
+# a sampling profiler attributes time to the code that ships rather than to a debug
+# build whose costs differ. `strip = "none"` overrides the release strip, which would
+# leave a profile of bare addresses.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"

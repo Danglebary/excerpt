@@ -1,0 +1,14 @@
+{
+  "name": "excerpt",
+  "description": "The excerpt plugin for Claude Code.",
+  "owner": {
+    "name": "Danglebary"
+  },
+  "plugins": [
+    {
+      "name": "excerpt",
+      "source": "./claude-code/excerpt",
+      "description": "A skill teaching agents to read Rust and TypeScript by item with the excerpt binary: an outline of what a file or directory declares, and one item printed whole by name."
+    }
+  ]
+}
