@@ -253,12 +253,11 @@ pub fn members(items: &[Item], index: usize) -> &[Item] {
     nested
 }
 
-/// A declaration one language's classifier found at a node.
+/// A declaration one language's classifier found at a node, which spans that node and the
+/// comments and attributes directly above it.
 struct Found<'tree> {
     kind: Kind,
     name: String,
-    /// The node whose lines the item spans before the comments above it are added.
-    node: Node<'tree>,
     /// The node holding the declarations nested in this one, and the name they are
     /// qualified by, which for a trait impl is its type rather than its own name.
     body: Option<(Node<'tree>, String)>,
@@ -272,16 +271,28 @@ struct Grammar {
     leading: &'static [&'static str],
 }
 
+/// A node waiting to be classified: the first line it spans once the comments and
+/// attributes directly above it are added, and the names of the items it sits in.
+struct Pending<'tree> {
+    node: Node<'tree>,
+    first_line: usize,
+    scope: Vec<String>,
+}
+
 /// Every item under `root`, in document order. The walk keeps its own stack, so a deep
 /// file cannot exhaust the thread's, and it stops descending at `NESTING_DEPTH_MAX`.
 fn collect(root: Node<'_>, text: &str, grammar: &Grammar) -> Vec<Item> {
     let mut items = Vec::new();
-    let mut pending: Vec<(Node<'_>, Vec<String>)> = Vec::new();
-    push_children(&mut pending, root, &[]);
-    while let Some((node, scope)) = pending.pop() {
+    let mut pending: Vec<Pending<'_>> = Vec::new();
+    push_children(&mut pending, root, &[], grammar.leading);
+    while let Some(Pending {
+        node,
+        first_line,
+        scope,
+    }) = pending.pop()
+    {
         for found in (grammar.classify)(node, text) {
-            let first = first_line_with_leading(found.node, grammar.leading);
-            let lines = Lines::new(first, last_line(found.node));
+            let lines = Lines::new(first_line, last_line(node));
             let mut path = scope.clone();
             path.push(found.name);
             items.push(Item::new(found.kind, path, lines));
@@ -289,7 +300,7 @@ fn collect(root: Node<'_>, text: &str, grammar: &Grammar) -> Vec<Item> {
                 let mut inner = scope.clone();
                 inner.push(qualifier);
                 if inner.len() < NESTING_DEPTH_MAX {
-                    push_children(&mut pending, body, &inner);
+                    push_children(&mut pending, body, &inner, grammar.leading);
                 }
             }
         }
@@ -297,63 +308,97 @@ fn collect(root: Node<'_>, text: &str, grammar: &Grammar) -> Vec<Item> {
     items
 }
 
-/// Pushes a node's named children last first, so the stack pops them in document order.
+/// The comments and attributes directly above the next sibling, which a declaration there
+/// spans: the first line of the run and the last line of its final node.
+#[derive(Clone, Copy)]
+struct LeadingRun {
+    first: usize,
+    last: usize,
+}
+
+/// Pushes a node's named children last first, so the stack pops them in document order,
+/// each with its first line once the comments and attributes directly above it are added.
+///
+/// The run above each child is carried forward through one pass over every child, named or
+/// not, because tree-sitter finds a node's sibling by first searching down from the root
+/// for its parent:
+/// <https://github.com/tree-sitter/tree-sitter/blob/v0.27.1/lib/src/node.c> — checked
+/// 2026-10-10
 fn push_children<'tree>(
-    pending: &mut Vec<(Node<'tree>, Vec<String>)>,
+    pending: &mut Vec<Pending<'tree>>,
     node: Node<'tree>,
     scope: &[String],
+    leading: &[&str],
 ) {
     let mut cursor = node.walk();
-    let start = pending.len();
-    for child in node.named_children(&mut cursor) {
-        pending.push((child, scope.to_vec()));
+    let first_pushed = pending.len();
+    let mut previous_last_line: Option<usize> = None;
+    let mut run: Option<LeadingRun> = None;
+    for child in node.children(&mut cursor) {
+        let child_last_line = last_line(child);
+        if child.is_named() {
+            let first_line = first_line_below(run, start_line(child));
+            run = if leads(child, previous_last_line, leading) {
+                Some(LeadingRun {
+                    first: first_line,
+                    last: child_last_line,
+                })
+            } else {
+                None
+            };
+            pending.push(Pending {
+                node: child,
+                first_line,
+                scope: scope.to_vec(),
+            });
+        }
+        previous_last_line = Some(child_last_line);
     }
-    let Some(pushed) = pending.get_mut(start..) else {
+    let Some(pushed) = pending.get_mut(first_pushed..) else {
         unreachable!("the stack's length before the pushes is at most its length after");
     };
     pushed.reverse();
 }
 
-/// The first line of a declaration once the comments and attributes directly above it
-/// are added: each one counts while no blank line separates it from what follows, it
-/// documents its enclosing module (`//!`), or it trails the code on its own first line.
-fn first_line_with_leading(node: Node<'_>, leading: &[&str]) -> usize {
-    let mut first = start_line(node);
-    let mut candidate = node.prev_named_sibling();
-    while let Some(sibling) = candidate {
-        if !leading.contains(&sibling.kind()) {
-            break;
-        }
-        if is_inner_doc_comment(sibling) {
-            break;
-        }
-        if trails_code(sibling) {
-            break;
-        }
-        let Some(after) = last_line(sibling).checked_add(1) else {
-            unreachable!("a line number is below usize::MAX");
-        };
-        if after < first {
-            break;
-        }
-        first = start_line(sibling);
-        candidate = sibling.prev_named_sibling();
+/// The first line a node starting on `starts_on` spans: the first line of the run directly
+/// above it where no blank line separates the two, and `starts_on` otherwise.
+fn first_line_below(run: Option<LeadingRun>, starts_on: usize) -> usize {
+    let Some(run) = run else {
+        return starts_on;
+    };
+    assert!(
+        run.first <= run.last,
+        "a run ends at or after its first line"
+    );
+    assert!(run.last <= starts_on, "siblings come in document order");
+    let Some(after) = run.last.checked_add(1) else {
+        unreachable!("a line number is below usize::MAX");
+    };
+    if after >= starts_on {
+        run.first
+    } else {
+        starts_on
     }
-    first
+}
+
+/// Whether a node belongs to the declaration below it: it is of a leading kind, it does
+/// not document its enclosing module (`//!`), and it does not start on the line where the
+/// sibling before it, named or not, ends.
+fn leads(node: Node<'_>, previous_last_line: Option<usize>, leading: &[&str]) -> bool {
+    if !leading.contains(&node.kind()) {
+        return false;
+    }
+    if is_inner_doc_comment(node) {
+        return false;
+    }
+    let trails_code = previous_last_line == Some(start_line(node));
+    !trails_code
 }
 
 fn is_inner_doc_comment(node: Node<'_>) -> bool {
     let mut cursor = node.walk();
     let mut children = node.named_children(&mut cursor);
     children.any(|child| child.kind() == "inner_doc_comment_marker")
-}
-
-/// Whether a node starts on the line where the node before it ends.
-fn trails_code(node: Node<'_>) -> bool {
-    match node.prev_sibling() {
-        Some(previous) => last_line(previous) == start_line(node),
-        None => false,
-    }
 }
 
 fn start_line(node: Node<'_>) -> usize {

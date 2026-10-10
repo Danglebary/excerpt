@@ -39,12 +39,7 @@ fn classify<'tree>(node: Node<'tree>, text: &str) -> Vec<Found<'tree>> {
         Some(body) if matches!(kind, Kind::Trait | Kind::Mod) => Some((body, name.clone())),
         _ => None,
     };
-    vec![Found {
-        kind,
-        name,
-        node,
-        body,
-    }]
+    vec![Found { kind, name, body }]
 }
 
 /// An impl is named by its type, `Cursor`, or by its trait and type, `Display for
@@ -66,7 +61,6 @@ fn impl_found<'tree>(node: Node<'tree>, text: &str) -> Option<Found<'tree>> {
     Some(Found {
         kind: Kind::Impl,
         name,
-        node,
         body,
     })
 }

@@ -28,88 +28,60 @@ fn classify<'tree>(node: Node<'tree>, text: &str) -> Vec<Found<'tree>> {
     };
     match declaration.kind() {
         "function_declaration" | "generator_function_declaration" => {
-            named(Kind::Function, node, declaration, text)
+            named(Kind::Function, declaration, text)
         }
-        "function_expression" | "function" => anonymous(Kind::Function, node, declaration, text),
+        "function_expression" | "function" => anonymous(Kind::Function, declaration, text),
         "class_declaration" | "abstract_class_declaration" => {
-            container(Kind::Class, node, declaration, text)
+            container(Kind::Class, declaration, text)
         }
-        "class" => anonymous(Kind::Class, node, declaration, text),
-        "interface_declaration" => named(Kind::Interface, node, declaration, text),
-        "type_alias_declaration" => named(Kind::Type, node, declaration, text),
-        "enum_declaration" => named(Kind::Enum, node, declaration, text),
-        "internal_module" | "module" => container(Kind::Namespace, node, declaration, text),
-        "lexical_declaration" | "variable_declaration" => declarators(node, declaration, text),
-        "method_definition" | "abstract_method_signature" => {
-            named(Kind::Method, node, declaration, text)
-        }
-        "public_field_definition" => function_field(node, declaration, text),
+        "class" => anonymous(Kind::Class, declaration, text),
+        "interface_declaration" => named(Kind::Interface, declaration, text),
+        "type_alias_declaration" => named(Kind::Type, declaration, text),
+        "enum_declaration" => named(Kind::Enum, declaration, text),
+        "internal_module" | "module" => container(Kind::Namespace, declaration, text),
+        "lexical_declaration" | "variable_declaration" => declarators(declaration, text),
+        "method_definition" | "abstract_method_signature" => named(Kind::Method, declaration, text),
+        "public_field_definition" => function_field(declaration, text),
         _ => Vec::new(),
     }
 }
 
-/// A declaration named by its `name` field, which spans `node`.
-fn named<'tree>(
-    kind: Kind,
-    node: Node<'tree>,
-    declaration: Node<'_>,
-    text: &str,
-) -> Vec<Found<'tree>> {
+/// A declaration named by its `name` field.
+fn named<'tree>(kind: Kind, declaration: Node<'tree>, text: &str) -> Vec<Found<'tree>> {
     let Some(name) = field_text(declaration, "name", text) else {
         return Vec::new();
     };
     vec![Found {
         kind,
         name,
-        node,
         body: None,
     }]
 }
 
 /// A default export's function or class, named `default` when it carries no name.
-fn anonymous<'tree>(
-    kind: Kind,
-    node: Node<'tree>,
-    declaration: Node<'tree>,
-    text: &str,
-) -> Vec<Found<'tree>> {
+fn anonymous<'tree>(kind: Kind, declaration: Node<'tree>, text: &str) -> Vec<Found<'tree>> {
     let name =
         field_text(declaration, "name", text).unwrap_or_else(|| DEFAULT_EXPORT_NAME.to_owned());
     let body = declaration
         .child_by_field_name("body")
         .map(|body| (body, name.clone()));
-    vec![Found {
-        kind,
-        name,
-        node,
-        body,
-    }]
+    vec![Found { kind, name, body }]
 }
 
 /// A class or namespace, whose body's declarations are qualified by its name.
-fn container<'tree>(
-    kind: Kind,
-    node: Node<'tree>,
-    declaration: Node<'tree>,
-    text: &str,
-) -> Vec<Found<'tree>> {
+fn container<'tree>(kind: Kind, declaration: Node<'tree>, text: &str) -> Vec<Found<'tree>> {
     let Some(name) = field_text(declaration, "name", text) else {
         return Vec::new();
     };
     let body = declaration
         .child_by_field_name("body")
         .map(|body| (body, name.clone()));
-    vec![Found {
-        kind,
-        name,
-        node,
-        body,
-    }]
+    vec![Found { kind, name, body }]
 }
 
 /// One item per name a `const`, `let`, or `var` statement declares, each spanning the
 /// whole statement; a destructuring pattern declares no single name and is left out.
-fn declarators<'tree>(node: Node<'tree>, declaration: Node<'_>, text: &str) -> Vec<Found<'tree>> {
+fn declarators<'tree>(declaration: Node<'tree>, text: &str) -> Vec<Found<'tree>> {
     let keyword = field_text(declaration, "kind", text).unwrap_or_else(|| "var".to_owned());
     let Some(kind) = Kind::of_keyword(&keyword) else {
         return Vec::new();
@@ -129,7 +101,6 @@ fn declarators<'tree>(node: Node<'tree>, declaration: Node<'_>, text: &str) -> V
         found.push(Found {
             kind,
             name: node_text(name_node, text).to_owned(),
-            node,
             body: None,
         });
     }
@@ -138,17 +109,13 @@ fn declarators<'tree>(node: Node<'tree>, declaration: Node<'_>, text: &str) -> V
 
 /// A class field holding a function is a method in all but syntax; a field holding any
 /// other value is state, and is left out.
-fn function_field<'tree>(
-    node: Node<'tree>,
-    declaration: Node<'_>,
-    text: &str,
-) -> Vec<Found<'tree>> {
+fn function_field<'tree>(declaration: Node<'tree>, text: &str) -> Vec<Found<'tree>> {
     let Some(value) = declaration.child_by_field_name("value") else {
         return Vec::new();
     };
     match value.kind() {
         "arrow_function" | "function_expression" | "function" => {
-            named(Kind::Method, node, declaration, text)
+            named(Kind::Method, declaration, text)
         }
         _ => Vec::new(),
     }
