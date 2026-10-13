@@ -6,7 +6,7 @@
 use std::fmt::Write as _;
 use std::fs;
 
-use excerpt::parallel::{FIRST_PASS_INPUT_BYTES_MAX, WORKERS_MAX};
+use excerpt::parallel::{ATTEMPT_INPUT_BYTES_MAX, WORKERS_MAX};
 use excerpt::report::LISTED_MATCHES_MAX;
 use support::{Scratch, run};
 
@@ -125,12 +125,12 @@ mod given_outline {
     }
 
     #[test]
-    fn when_run_on_a_file_the_first_pass_defers_then_it_keeps_its_place_in_name_order() {
+    fn when_run_on_a_file_an_attempt_defers_then_it_keeps_its_place_in_name_order() {
         let scratch = Scratch::new();
         scratch.write("src/a.rs", "fn a() {}\n");
         scratch.write("src/c.rs", "fn c() {}\n");
         let filler = "    // filler\n";
-        let bytes_max = usize::try_from(FIRST_PASS_INPUT_BYTES_MAX).unwrap();
+        let bytes_max = usize::try_from(ATTEMPT_INPUT_BYTES_MAX).unwrap();
         let filler_count = (bytes_max / filler.len()).checked_add(1).unwrap();
         let mut large = String::from("fn b() {\n");
         for _ in 0..filler_count {

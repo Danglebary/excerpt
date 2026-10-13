@@ -5,6 +5,7 @@
 use std::fs;
 use std::io::{self, Read, Write};
 use std::num::NonZeroUsize;
+use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -12,7 +13,7 @@ use excerpt::cli::{self, Command};
 use excerpt::exit_code;
 use excerpt::item::{self, Outline};
 use excerpt::language::Language;
-use excerpt::parallel::{self, Attempt, FIRST_PASS_INPUT_BYTES_MAX, Passes, Pool};
+use excerpt::parallel::{self, ATTEMPT_INPUT_BYTES_MAX, Attempt, Pool, Work};
 use excerpt::query::{self, Answer};
 use excerpt::report::{self, Entry, File, OUTLINE_ITEMS_MAX};
 use excerpt::select::{self, Match, Selection};
@@ -212,14 +213,14 @@ fn grown<T>(file: &fs::File) -> Sourced<T> {
     }
 }
 
-/// As `use_source`, except that a file the first pass defers is left unread.
+/// As `use_source`, except that a file an attempt defers is left unread.
 fn attempt_source<T>(
     source: &Source,
     use_text: &impl Fn(&Source, String) -> T,
 ) -> Attempt<Sourced<T>> {
     let file = match open_source(&source.path) {
         Ok(Opened::File { file, bytes }) => {
-            if parallel::first_pass_defers(bytes) {
+            if parallel::attempt_defers(bytes) {
                 return Attempt::Deferred;
             }
             file
@@ -227,7 +228,7 @@ fn attempt_source<T>(
         Ok(Opened::TooLarge(bytes)) => return Attempt::Done(Sourced::TooLarge(bytes)),
         Err(error) => return Attempt::Done(Sourced::Failed(error)),
     };
-    match read_contents(&file, FIRST_PASS_INPUT_BYTES_MAX) {
+    match read_contents(&file, ATTEMPT_INPUT_BYTES_MAX) {
         Ok(Contents::Text(text)) => Attempt::Done(Sourced::Used(use_text(source, text))),
         Ok(Contents::NotText) => Attempt::Done(Sourced::NotText),
         Ok(Contents::Longer) => Attempt::Deferred,
@@ -235,18 +236,19 @@ fn attempt_source<T>(
     }
 }
 
-/// Every source's outcome, in walk order, the files the first pass defers read on the
-/// second, since a parse's memory grows with its file.
-fn use_sources<T: Send>(
-    sources: &[Source],
+/// Every source's outcome handed to `consume` in walk order until it breaks, the files an
+/// attempt defers read by few threads at once, since a parse's memory grows with its file.
+fn consume_sources<'sources, T: Send>(
+    sources: &'sources [Source],
     use_text: impl Fn(&Source, String) -> T + Sync,
-) -> Vec<Sourced<T>> {
+    consume: impl FnMut(&'sources Source, Sourced<T>) -> ControlFlow<()>,
+) {
     let pool = Pool::new(available_threads());
-    let passes = Passes {
-        first: |source: &Source| attempt_source(source, &use_text),
-        second: |source: &Source| use_source(source, &use_text),
+    let work = Work {
+        attempt: |source: &Source| attempt_source(source, &use_text),
+        deferred: |source: &Source| use_source(source, &use_text),
     };
-    pool.map_in_two_passes(sources, passes)
+    pool.consume_in_order(sources, &work, consume);
 }
 
 /// The threads the machine offers this process, or one where it cannot say.
@@ -262,28 +264,22 @@ fn run_outline(paths: &[String]) -> u8 {
         Ok(collected) => collected,
         Err((code, message)) => return emit("", &message, code),
     };
-    let sourced = use_sources(&collected.sources, |source, text| {
-        item::outline(source.language, &text)
-    });
-    assert_eq!(
-        sourced.len(),
-        collected.sources.len(),
-        "every source has an outcome"
-    );
     let mut failures = collected.failures;
-    let mut read: Vec<(String, ReadOutline)> = Vec::new();
-    for (source, outcome) in collected.sources.into_iter().zip(sourced) {
+    let mut read: Vec<(&str, ReadOutline)> = Vec::new();
+    let outline_source = |source: &Source, text: String| item::outline(source.language, &text);
+    consume_sources(&collected.sources, outline_source, |source, outcome| {
         let state = match outcome {
             Sourced::Used(outline) => ReadOutline::Outlined(source.language, outline),
             Sourced::TooLarge(bytes) => ReadOutline::TooLarge(bytes),
             Sourced::NotText => ReadOutline::NotText,
             Sourced::Failed(error) => {
                 failures.push_str(&report::read_failure(&source.path, &error.to_string()));
-                continue;
+                return ControlFlow::Continue(());
             }
         };
-        read.push((source.path, state));
-    }
+        read.push((&source.path, state));
+        ControlFlow::Continue(())
+    });
     let files: Vec<File<'_>> = read
         .iter()
         .map(|(path, state)| File {
@@ -360,11 +356,10 @@ fn run_show(name: &str, all: bool, paths: &[String]) -> u8 {
         Ok(collected) => collected,
         Err((code, message)) => return emit("", &message, code),
     };
-    let sourced = use_sources(&collected.sources, |source, text| {
+    let gathered = gather(collected, |source, text| {
         let answer = query.answer_in(source.language, &text);
         kept(answer, text)
     });
-    let gathered = gather(collected, sourced);
     let selection = select::select(gathered.matches, all);
     let (printed, refusal) = render_selection(name, paths, &gathered.loaded, selection);
     let mut notes = gathered.notes;
@@ -391,14 +386,12 @@ fn kept(answer: Answer, text: String) -> Kept {
     }
 }
 
-/// Every file's outcome joined to its source in walk order, each answering item numbered
-/// by its file's place among the files kept.
-fn gather(collected: Collected, sourced: Vec<Sourced<Kept>>) -> Gathered {
-    assert_eq!(
-        sourced.len(),
-        collected.sources.len(),
-        "every source has an outcome"
-    );
+/// Every source's answer in walk order, each answering item numbered by its file's place
+/// among the files kept.
+fn gather(
+    collected: Collected,
+    answer_source: impl Fn(&Source, String) -> Kept + Sync,
+) -> Gathered {
     let failed = !collected.failures.is_empty();
     let mut gathered = Gathered {
         loaded: Vec::new(),
@@ -406,7 +399,7 @@ fn gather(collected: Collected, sourced: Vec<Sourced<Kept>>) -> Gathered {
         notes: collected.failures,
         failed,
     };
-    for (source, outcome) in collected.sources.into_iter().zip(sourced) {
+    consume_sources(&collected.sources, answer_source, |source, outcome| {
         match outcome {
             Sourced::Used(Kept::Answered {
                 outline,
@@ -418,7 +411,7 @@ fn gather(collected: Collected, sourced: Vec<Sourced<Kept>>) -> Gathered {
                     gathered.matches.push(Match { file, item });
                 }
                 gathered.loaded.push(Loaded {
-                    path: source.path,
+                    path: source.path.clone(),
                     language: source.language,
                     outline,
                     text,
@@ -440,7 +433,8 @@ fn gather(collected: Collected, sourced: Vec<Sourced<Kept>>) -> Gathered {
                 gathered.failed = true;
             }
         }
-    }
+        ControlFlow::Continue(())
+    });
     gathered
 }
 
