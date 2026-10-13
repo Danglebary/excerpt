@@ -6,6 +6,8 @@
 use std::fmt::Write as _;
 use std::fs;
 
+use excerpt::parallel::{ATTEMPT_INPUT_BYTES_MAX, WORKERS_MAX};
+use excerpt::report::{LISTED_MATCHES_MAX, OUTLINE_ITEMS_MAX};
 use support::{Scratch, run};
 
 #[cfg(test)]
@@ -72,6 +74,9 @@ impl Plan {
 pub fn apply(plan: &Plan) {}
 ";
 
+/// The largest file the binary reads, 2 MiB.
+const FILE_BYTES_MAX: usize = 2_097_152;
+
 mod given_outline {
     use super::*;
 
@@ -103,6 +108,48 @@ mod given_outline {
     }
 
     #[test]
+    fn when_run_on_more_files_than_workers_then_they_are_outlined_in_name_order() {
+        let scratch = Scratch::new();
+        let file_count = WORKERS_MAX.checked_mul(3).unwrap();
+        let mut expected = String::new();
+        for file in 0..file_count {
+            let name = format!("src/file_{file:02}.rs");
+            scratch.write(&name, &format!("fn item_{file}() {{}}\n"));
+            writeln!(expected, "{name}\n  1-1 fn item_{file}").unwrap();
+        }
+
+        let (code, stdout, stderr) = run(&scratch, &["outline", "src"]);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(stdout, expected);
+    }
+
+    #[test]
+    fn when_run_on_a_file_an_attempt_defers_then_it_keeps_its_place_in_name_order() {
+        let scratch = Scratch::new();
+        scratch.write("src/a.rs", "fn a() {}\n");
+        scratch.write("src/c.rs", "fn c() {}\n");
+        let filler = "    // filler\n";
+        let bytes_max = usize::try_from(ATTEMPT_INPUT_BYTES_MAX).unwrap();
+        let filler_count = (bytes_max / filler.len()).checked_add(1).unwrap();
+        let mut large = String::from("fn b() {\n");
+        for _ in 0..filler_count {
+            large.push_str(filler);
+        }
+        large.push_str("}\n");
+        scratch.write("src/b.rs", &large);
+        let last_line = filler_count.checked_add(2).unwrap();
+
+        let (code, stdout, stderr) = run(&scratch, &["outline", "src"]);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(
+            stdout,
+            format!("src/a.rs\n  1-1 fn a\nsrc/b.rs\n  1-{last_line} fn b\nsrc/c.rs\n  1-1 fn c\n")
+        );
+    }
+
+    #[test]
     fn when_run_on_the_working_directory_then_ignored_and_hidden_files_are_skipped() {
         let scratch = Scratch::new();
         scratch.write(".gitignore", "target/\n");
@@ -117,6 +164,43 @@ mod given_outline {
     }
 
     #[test]
+    fn when_run_on_more_items_than_the_bound_then_it_stops_in_the_file_reaching_it() {
+        let scratch = Scratch::new();
+        let items_per_file: usize = 300;
+        assert!(
+            OUTLINE_ITEMS_MAX > items_per_file,
+            "the first file fits the bound"
+        );
+        assert!(
+            OUTLINE_ITEMS_MAX < items_per_file.checked_mul(2).unwrap(),
+            "the second file reaches the bound"
+        );
+        let second_listed = OUTLINE_ITEMS_MAX.checked_sub(items_per_file).unwrap();
+        let second_left_out = items_per_file.checked_sub(second_listed).unwrap();
+        let mut expected = String::new();
+        for (file, listed) in [("a", items_per_file), ("b", second_listed), ("c", 0)] {
+            let mut text = String::new();
+            for line in 1..=items_per_file {
+                writeln!(text, "fn {file}_{line}() {{}}").unwrap();
+            }
+            scratch.write(&format!("src/{file}.rs"), &text);
+            if listed > 0 {
+                writeln!(expected, "src/{file}.rs").unwrap();
+            }
+            for line in 1..=listed {
+                writeln!(expected, "  {line}-{line} fn {file}_{line}").unwrap();
+            }
+        }
+        writeln!(expected, "  ({second_left_out} more items left out)").unwrap();
+        writeln!(expected, "1 more file left out; outline a narrower path").unwrap();
+
+        let (code, stdout, stderr) = run(&scratch, &["outline", "src"]);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(stdout, expected);
+    }
+
+    #[test]
     fn when_run_on_a_file_that_is_not_utf8_then_it_is_named_as_skipped() {
         let scratch = Scratch::new();
         fs::write(scratch.root.join("binary.rs"), [0xff_u8, 0xfe, 0x00]).unwrap();
@@ -125,6 +209,26 @@ mod given_outline {
 
         assert_eq!(code, 0);
         assert_eq!(stdout, "binary.rs\n  (skipped: not UTF-8 text)\n");
+    }
+
+    #[test]
+    fn when_run_on_a_file_larger_than_the_read_bound_then_it_is_named_as_skipped() {
+        let scratch = Scratch::new();
+        let filler = "// generated\n";
+        let filler_count = (FILE_BYTES_MAX / filler.len()).checked_add(1).unwrap();
+        let large = filler.repeat(filler_count);
+        scratch.write("src/generated.rs", &large);
+        let bytes = large.len();
+
+        let (code, stdout, stderr) = run(&scratch, &["outline", "src/generated.rs"]);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(
+            stdout,
+            format!(
+                "src/generated.rs\n  (skipped: {bytes} bytes, more than the {FILE_BYTES_MAX} excerpt reads)\n"
+            )
+        );
     }
 }
 
@@ -192,6 +296,51 @@ mod given_show {
             stderr.contains("no item answers `absent` under src"),
             "{stderr}"
         );
+    }
+
+    #[test]
+    fn when_items_in_more_files_than_workers_answer_then_they_are_listed_in_name_order() {
+        let scratch = Scratch::new();
+        let file_count = WORKERS_MAX.checked_mul(3).unwrap();
+        // Each file holds the item on a line of its own, so a file listed with another
+        // file's outcome shows the wrong lines.
+        for file in 0..file_count {
+            let text = format!("{}fn shared() {{}}\n", "\n".repeat(file));
+            scratch.write(&format!("src/file_{file:02}.rs"), &text);
+        }
+
+        let (code, _, stderr) = run(&scratch, &["show", "shared", "src"]);
+
+        assert_eq!(code, 1);
+        let listed: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.starts_with("  src/"))
+            .collect();
+        let expected: Vec<String> = (0..LISTED_MATCHES_MAX)
+            .map(|file| {
+                let line = file.checked_add(1).unwrap();
+                format!("  src/file_{file:02}.rs:{line}-{line} fn shared")
+            })
+            .collect();
+        assert_eq!(listed, expected);
+    }
+
+    #[test]
+    fn when_more_items_answer_than_are_listed_then_every_one_is_counted() {
+        let scratch = Scratch::new();
+        let file_count = LISTED_MATCHES_MAX.checked_add(10).unwrap();
+        for file in 0..file_count {
+            scratch.write(&format!("src/file_{file:02}.rs"), "fn shared() {}\n");
+        }
+
+        let (code, _, stderr) = run(&scratch, &["show", "shared", "src"]);
+
+        assert_eq!(code, 1);
+        assert!(
+            stderr.starts_with(&format!("excerpt: {file_count} items answer `shared`;")),
+            "{stderr}"
+        );
+        assert!(stderr.ends_with("\n  and 10 more\n"), "{stderr}");
     }
 
     #[test]
@@ -280,5 +429,87 @@ mod given_the_command_line {
 
         assert_eq!(code, 0);
         assert_eq!(stdout, format!("excerpt {}\n", env!("CARGO_PKG_VERSION")));
+    }
+}
+
+#[cfg(target_env = "musl")]
+mod given_musl {
+    use std::process::Command;
+
+    use super::*;
+
+    /// Items in the generated file: enough that its parse holds most of the process's
+    /// memory.
+    const ITEM_COUNT: usize = 15_000;
+    /// The least share of the process's peak memory mimalloc must have committed: most of
+    /// it, which holds only when the parse's allocations are mimalloc's.
+    const COMMITTED_SHARE_MIN: f64 = 0.5;
+
+    #[test]
+    fn when_a_large_file_is_parsed_then_mimalloc_commits_most_of_the_memory() {
+        let scratch = Scratch::new();
+        let mut text = String::from("impl Items {\n");
+        for index in 0..ITEM_COUNT {
+            writeln!(
+                text,
+                "    /// Item {index}.\n    fn item_{index}() {{\n        let value = {index};\n    }}"
+            )
+            .unwrap();
+        }
+        text.push_str("}\n");
+        scratch.write("items.rs", &text);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_excerpt"))
+            .args(["outline", "items.rs"])
+            .env("MIMALLOC_SHOW_STATS", "1")
+            .current_dir(&scratch.root)
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let peak_rss = statistic(&stderr, "peak rss: ");
+        let peak_commit = statistic(&stderr, "peak commit: ");
+        assert!(peak_commit >= peak_rss * COMMITTED_SHARE_MIN, "{stderr}");
+    }
+
+    /// The size mimalloc's statistics print after `label`, such as `46.7 MiB`, in bytes.
+    #[cfg(test)]
+    fn statistic(stderr: &str, label: &str) -> f64 {
+        let (_, after) = stderr
+            .split_once(label)
+            .unwrap_or_else(|| panic!("mimalloc prints `{label}`:\n{stderr}"));
+        let mut words = after.split_whitespace();
+        let number: f64 = words.next().unwrap().parse().unwrap();
+        let unit = words.next().unwrap().trim_end_matches(',');
+        let scale = match unit {
+            "B" => 1.0,
+            "KiB" => 1_024.0,
+            "MiB" => 1_048_576.0,
+            "GiB" => 1_073_741_824.0,
+            other => panic!("`{other}` is a unit mimalloc prints"),
+        };
+        number * scale
+    }
+}
+
+#[cfg(not(target_env = "musl"))]
+mod given_another_c_library {
+    use std::process::Command;
+
+    use super::*;
+
+    #[test]
+    fn when_run_asking_mimalloc_for_statistics_then_none_print() {
+        let scratch = Scratch::new();
+        scratch.write("plan.rs", PLAN);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_excerpt"))
+            .args(["outline", "plan.rs"])
+            .env("MIMALLOC_SHOW_STATS", "1")
+            .current_dir(&scratch.root)
+            .output()
+            .unwrap();
+
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
     }
 }

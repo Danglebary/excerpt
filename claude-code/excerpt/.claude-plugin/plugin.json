@@ -1,6 +1,6 @@
 {
   "name": "excerpt",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A skill teaching agents to read Rust and TypeScript by item with the excerpt binary: an outline of what a file or directory declares, and one item printed whole by name. Needs the excerpt binary on PATH.",
   "author": {
     "name": "Danglebary"

@@ -130,6 +130,35 @@ mod given_a_file_text {
     }
 
     #[test]
+    fn when_answered_lacking_a_word_of_the_name_then_it_is_screened() {
+        let answer = query("Cursor::new").answer_in(Language::Rust, "impl Plan { fn new() {} }");
+
+        assert_eq!(answer, Answer::Screened);
+    }
+
+    #[test]
+    fn when_answered_holding_the_words_in_no_item_then_it_is_unanswered() {
+        let text = "// A Cursor is new.\nfn other() {}\n";
+
+        let answer = query("Cursor::new").answer_in(Language::Rust, text);
+
+        assert_eq!(answer, Answer::Unanswered);
+    }
+
+    #[test]
+    fn when_answered_then_the_answering_items_are_indexed_in_document_order() {
+        let text = "impl Cursor {\n    fn new() {}\n}\nfn new() {}\n";
+
+        let answer = query("new").answer_in(Language::Rust, text);
+
+        let expected = Answer::Answered {
+            outline: outline(Language::Rust, text),
+            items: vec![1, 2],
+        };
+        assert_eq!(answer, expected);
+    }
+
+    #[test]
     fn when_screened_then_every_item_a_name_answers_passes() {
         let rows = [
             (

@@ -179,6 +179,26 @@ fn b() {}
     }
 
     #[test]
+    fn when_outlined_then_a_comment_trailing_an_opening_brace_is_left_out() {
+        let text = "\
+impl Cursor { // The cursor.
+    fn new() -> Self { Self }
+}
+";
+        assert_eq!(rust(text), ["1-3 impl Cursor", "2-2 fn Cursor::new"]);
+    }
+
+    #[test]
+    fn when_outlined_then_a_comment_below_a_trailing_one_is_kept() {
+        let text = "\
+const A: u8 = 1; // one
+// two
+fn b() {}
+";
+        assert_eq!(rust(text), ["1-1 const A", "2-3 fn b"]);
+    }
+
+    #[test]
     fn when_outlined_then_a_function_inside_a_function_body_is_not_an_item() {
         let text = "\
 fn outer() {

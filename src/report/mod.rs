@@ -1,16 +1,22 @@
 //! Every message excerpt prints, rendered from the library's values. Pure, so each message
 //! is built from values a test constructs.
 
+use std::ops::ControlFlow;
+
 use crate::cli::UsageFault;
 use crate::item::{Item, Outline};
 use crate::language::{EXTENSIONS, Language};
 use crate::query::QueryFault;
-use crate::select::{ITEM_LINES_MAX, PRINTED_MATCHES_MAX};
+use crate::select::{ITEM_LINES_MAX, KEPT_MATCHES_MAX, PRINTED_MATCHES_MAX};
 
 /// The most items one outline lists before counting the rest.
 pub const OUTLINE_ITEMS_MAX: usize = 500;
 /// The most matches a refusal lists before counting the rest.
 pub const LISTED_MATCHES_MAX: usize = 20;
+const _: () = assert!(
+    LISTED_MATCHES_MAX <= KEPT_MATCHES_MAX,
+    "a refusal lists no more matches than are kept"
+);
 /// The indent of an outline's item at the top level, under its file's path.
 const OUTLINE_INDENT: &str = "  ";
 /// The width a printed line's number is right-aligned to, the Read tool's.
@@ -80,57 +86,159 @@ pub fn item_text(path: &str, language: Language, item: &Item, text: &str) -> Str
     joined(&rendered)
 }
 
-/// Every file's items, each under its path, up to `items_max` items; past the bound the
-/// remaining items are counted and no later file is named.
-#[must_use]
-pub fn outline_text(files: &[File<'_>], items_max: usize) -> String {
-    let mut rendered = Vec::new();
-    let mut listed: usize = 0;
-    let mut left_out: usize = 0;
-    for file in files {
-        let Entry::Outlined { language, outline } = &file.entry else {
-            if listed < items_max {
-                rendered.push(file.path.to_owned());
-                rendered.push(format!("{OUTLINE_INDENT}({})", skip_reason(&file.entry)));
-            }
-            continue;
+/// An outline listed one file at a time in walk order, up to `items_max` items.
+pub struct Listing {
+    lines: Vec<String>,
+    listed: usize,
+    items_max: usize,
+}
+
+impl Listing {
+    /// # Panics
+    ///
+    /// When `items_max` is 0.
+    #[must_use]
+    pub const fn new(items_max: usize) -> Self {
+        assert!(items_max > 0, "an outline lists at least one item");
+        Self {
+            lines: Vec::new(),
+            listed: 0,
+            items_max,
+        }
+    }
+
+    /// Lists `file` under the files before it: its items up to the bound, each indented
+    /// by nesting, and a count of the rest. Breaks once the outline holds its bound of
+    /// items, after which no file is pushed.
+    ///
+    /// # Panics
+    ///
+    /// When a file is pushed after the listing broke.
+    pub fn push(&mut self, file: &File<'_>) -> ControlFlow<()> {
+        assert!(
+            self.listed < self.items_max,
+            "no file is pushed once the bound is reached"
+        );
+        self.lines.push(file.path.to_owned());
+        let Entry::Outlined {
+            language,
+            abridgment,
+        } = &file.entry
+        else {
+            let reason = skip_reason(&file.entry);
+            self.lines.push(format!("{OUTLINE_INDENT}({reason})"));
+            return ControlFlow::Continue(());
         };
-        if listed >= items_max {
-            left_out = add(left_out, outline.items.len());
-            continue;
+        let items = &abridgment.outline.items;
+        if items.is_empty() {
+            assert_eq!(
+                abridgment.left_out, 0,
+                "an abridgment keeps items it can list"
+            );
+            self.lines.push(format!("{OUTLINE_INDENT}(no items)"));
         }
-        rendered.push(file.path.to_owned());
-        if outline.items.is_empty() {
-            rendered.push(format!("{OUTLINE_INDENT}(no items)"));
+        let Some(room) = self.items_max.checked_sub(self.listed) else {
+            unreachable!("the listed items stay within the bound");
+        };
+        let shown = items.len().min(room);
+        for item in items.iter().take(shown) {
+            self.lines.push(outline_line(item, *language));
         }
-        for item in &outline.items {
-            if listed >= items_max {
-                left_out = add(left_out, 1);
-                continue;
-            }
-            let lines = item.lines();
-            let indent = OUTLINE_INDENT.repeat(add(item.depth(), 1));
-            rendered.push(format!(
-                "{indent}{}-{} {} {}",
-                lines.first(),
-                lines.last(),
-                item.kind().keyword(),
-                item.qualified_name(*language)
-            ));
-            listed = add(listed, 1);
+        self.listed = add(self.listed, shown);
+        let Some(unshown) = items.len().checked_sub(shown) else {
+            unreachable!("no more items are shown than a file holds");
+        };
+        let left_out = add(unshown, abridgment.left_out);
+        if left_out > 0 {
+            let noun = noun_for(left_out, "item", "items");
+            self.lines
+                .push(format!("{OUTLINE_INDENT}({left_out} more {noun} left out)"));
         }
-        if let Some(line) = outline.first_error_line {
-            rendered.push(format!(
+        if let Some(line) = abridgment.outline.first_error_line {
+            self.lines.push(format!(
                 "{OUTLINE_INDENT}(a syntax error at line {line}; items past it may be missing)"
             ));
         }
+        if self.listed == self.items_max {
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
     }
-    if left_out > 0 {
-        rendered.push(format!(
-            "{left_out} more items left out; outline a narrower path"
-        ));
+
+    /// The outline, closed by a count of the files left out after the bound was reached.
+    ///
+    /// # Panics
+    ///
+    /// When files are left out of a listing that did not reach its bound.
+    #[must_use]
+    pub fn text(self, files_left_out: usize) -> String {
+        let mut lines = self.lines;
+        if files_left_out > 0 {
+            assert_eq!(
+                self.listed, self.items_max,
+                "files are left out only once the bound is reached"
+            );
+            let noun = noun_for(files_left_out, "file", "files");
+            lines.push(format!(
+                "{files_left_out} more {noun} left out; outline a narrower path"
+            ));
+        }
+        joined(&lines)
     }
-    joined(&rendered)
+}
+
+/// One file's outline as an outline keeps it: no more than its first `items_max` items,
+/// and the count of the items it drops.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Abridgment {
+    pub outline: Outline,
+    pub left_out: usize,
+}
+
+/// `outline` holding no more than its first `items_max` items, counting the rest.
+///
+/// # Panics
+///
+/// When the items kept and the items counted differ from the items `outline` held.
+#[must_use]
+pub fn abridge(outline: Outline, items_max: usize) -> Abridgment {
+    let Outline {
+        mut items,
+        first_error_line,
+    } = outline;
+    let item_count = items.len();
+    let left_out = item_count.saturating_sub(items_max);
+    items.truncate(items_max);
+    assert_eq!(
+        add(items.len(), left_out),
+        item_count,
+        "every item is kept or counted"
+    );
+    Abridgment {
+        outline: Outline {
+            items,
+            first_error_line,
+        },
+        left_out,
+    }
+}
+
+/// One item's line in an outline: `  104-180 fn plan`, indented by its nesting.
+fn outline_line(item: &Item, language: Language) -> String {
+    let lines = item.lines();
+    let indent = OUTLINE_INDENT.repeat(add(item.depth(), 1));
+    format!(
+        "{indent}{}-{} {} {}",
+        lines.first(),
+        lines.last(),
+        item.kind().keyword(),
+        item.qualified_name(language)
+    )
+}
+
+/// `singular` for a count of one, `plural` for any other.
+const fn noun_for(count: usize, singular: &'static str, plural: &'static str) -> &'static str {
+    if count == 1 { singular } else { plural }
 }
 
 fn skip_reason(entry: &Entry<'_>) -> String {
@@ -160,17 +268,20 @@ fn joined(lines: &[String]) -> String {
     text
 }
 
-/// Up to `LISTED_MATCHES_MAX` headers, indented under a refusal, and a count of the rest.
-fn listed(headers: &[String]) -> Vec<String> {
+/// Up to `LISTED_MATCHES_MAX` headers, indented under a refusal, and a count of the rest
+/// of `count`.
+fn listed(headers: &[String], count: usize) -> Vec<String> {
+    assert!(headers.len() <= count, "every header is counted");
     let mut lines: Vec<String> = headers
         .iter()
         .take(LISTED_MATCHES_MAX)
         .map(|header| format!("  {header}"))
         .collect();
-    if let Some(unlisted) = headers.len().checked_sub(LISTED_MATCHES_MAX) {
-        if unlisted > 0 {
-            lines.push(format!("  and {unlisted} more"));
-        }
+    let Some(unlisted) = count.checked_sub(lines.len()) else {
+        unreachable!("no more headers are listed than are counted");
+    };
+    if unlisted > 0 {
+        lines.push(format!("  and {unlisted} more"));
     }
     lines
 }
@@ -183,14 +294,14 @@ pub fn missing(name: &str, paths: &[String]) -> String {
     )
 }
 
-/// The refusal for a name several items answer, listing each up to the bound.
+/// The refusal for a name `count` items answer, listing `headers`, the first of them, up
+/// to the bound.
 #[must_use]
-pub fn several(name: &str, headers: &[String]) -> String {
+pub fn several(name: &str, headers: &[String], count: usize) -> String {
     let mut rendered = vec![format!(
-        "excerpt: {} items answer `{name}`; name one by its kind or a qualified name, or pass --all to print each:",
-        headers.len()
+        "excerpt: {count} items answer `{name}`; name one by its kind or a qualified name, or pass --all to print each:"
     )];
-    rendered.extend(listed(headers));
+    rendered.extend(listed(headers, count));
     joined(&rendered)
 }
 
@@ -211,7 +322,7 @@ pub fn too_long(header: &str, count: usize, member_headers: &[String]) -> String
         return format!("{opening}; read a range of it with the Read tool\n");
     }
     let mut rendered = vec![format!("{opening}; show one of its members:")];
-    rendered.extend(listed(member_headers));
+    rendered.extend(listed(member_headers, member_headers.len()));
     joined(&rendered)
 }
 
@@ -287,7 +398,7 @@ fn extension_list() -> String {
 pub enum Entry<'outline> {
     Outlined {
         language: Language,
-        outline: &'outline Outline,
+        abridgment: &'outline Abridgment,
     },
     TooLarge {
         bytes: u64,

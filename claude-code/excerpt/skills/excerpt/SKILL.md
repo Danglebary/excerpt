@@ -24,7 +24,7 @@ src/plan/mod.rs
     251-260 fn Cursor::new
 ```
 
-A directory is walked as git sees it, so ignored and hidden files are skipped. An outline lists at most 500 items and counts the rest; outline a narrower path when it does.
+A directory is walked as git sees it, so ignored and hidden files are skipped. An outline stops at 500 items and counts what it left out; outline a narrower path when it does.
 
 ## Read one item: show
 

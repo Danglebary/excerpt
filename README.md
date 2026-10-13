@@ -35,7 +35,7 @@ A name is what an outline prints after the line numbers, or any trailing part of
 | `impl Cursor` | the impl block, not the struct it shares a name with |
 | `impl Display for Cursor` | a trait impl |
 
-When several items answer a name, `show` lists them and exits 1 rather than choosing one; `--all` prints every match, up to 20. An item longer than 1,000 lines is refused with a list of its members. A directory is walked as git sees it, skipping ignored and hidden files, and an outline lists at most 500 items before counting the rest. `excerpt --help` prints the whole grammar.
+When several items answer a name, `show` lists them and exits 1 rather than choosing one; `--all` prints every match, up to 20. An item longer than 1,000 lines is refused with a list of its members. A directory is walked as git sees it, skipping ignored and hidden files, and an outline stops at 500 items, counting the items left in the file it stops in and the files after it. `excerpt --help` prints the whole grammar.
 
 excerpt reads `.rs`, `.ts`, `.mts`, `.cts`, and `.tsx`. A grammar is compiled into the binary, so a language joins when transcripts show agents reading it by range.
 
