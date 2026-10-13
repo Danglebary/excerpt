@@ -15,7 +15,7 @@ use excerpt::item::{self, Outline};
 use excerpt::language::Language;
 use excerpt::parallel::{self, ATTEMPT_INPUT_BYTES_MAX, Attempt, Pool, Work};
 use excerpt::query::{self, Answer};
-use excerpt::report::{self, Entry, File, OUTLINE_ITEMS_MAX};
+use excerpt::report::{self, Entry, File, Listing, OUTLINE_ITEMS_MAX};
 use excerpt::select::{self, Match, Selection};
 
 /// The largest file read; a larger one is named as skipped.
@@ -265,29 +265,35 @@ fn run_outline(paths: &[String]) -> u8 {
         Err((code, message)) => return emit("", &message, code),
     };
     let mut failures = collected.failures;
-    let mut read: Vec<(&str, ReadOutline)> = Vec::new();
-    let outline_source = |source: &Source, text: String| item::outline(source.language, &text);
-    consume_sources(&collected.sources, outline_source, |source, outcome| {
-        let state = match outcome {
-            Sourced::Used(outline) => ReadOutline::Outlined(source.language, outline),
-            Sourced::TooLarge(bytes) => ReadOutline::TooLarge(bytes),
-            Sourced::NotText => ReadOutline::NotText,
+    let mut listing = Listing::new(OUTLINE_ITEMS_MAX);
+    let mut taken: usize = 0;
+    let abridge_source = |source: &Source, text: String| {
+        let outline = item::outline(source.language, &text);
+        report::abridge(outline, OUTLINE_ITEMS_MAX)
+    };
+    consume_sources(&collected.sources, abridge_source, |source, outcome| {
+        taken = add(taken, 1);
+        let entry = match &outcome {
+            Sourced::Used(abridgment) => Entry::Outlined {
+                language: source.language,
+                abridgment,
+            },
+            Sourced::TooLarge(bytes) => too_large(*bytes),
+            Sourced::NotText => Entry::NotText,
             Sourced::Failed(error) => {
                 failures.push_str(&report::read_failure(&source.path, &error.to_string()));
                 return ControlFlow::Continue(());
             }
         };
-        read.push((&source.path, state));
-        ControlFlow::Continue(())
-    });
-    let files: Vec<File<'_>> = read
-        .iter()
-        .map(|(path, state)| File {
-            path,
-            entry: state.entry(),
+        listing.push(&File {
+            path: &source.path,
+            entry,
         })
-        .collect();
-    let text = report::outline_text(&files, OUTLINE_ITEMS_MAX);
+    });
+    let Some(left_out) = collected.sources.len().checked_sub(taken) else {
+        unreachable!("no more sources are taken than were collected");
+    };
+    let text = listing.text(left_out);
     let code = if failures.is_empty() {
         exit_code::SUCCESS
     } else {
@@ -296,26 +302,11 @@ fn run_outline(paths: &[String]) -> u8 {
     emit(&text, &failures, code)
 }
 
-/// One file as an outline read it, owning the outline the report borrows.
-enum ReadOutline {
-    Outlined(Language, Outline),
-    TooLarge(u64),
-    NotText,
-}
-
-impl ReadOutline {
-    const fn entry(&self) -> Entry<'_> {
-        match self {
-            Self::Outlined(language, outline) => Entry::Outlined {
-                language: *language,
-                outline,
-            },
-            Self::TooLarge(bytes) => Entry::TooLarge {
-                bytes: *bytes,
-                bytes_max: FILE_BYTES_MAX,
-            },
-            Self::NotText => Entry::NotText,
-        }
+/// A file of `bytes` the read bound kept closed.
+const fn too_large(bytes: u64) -> Entry<'static> {
+    Entry::TooLarge {
+        bytes,
+        bytes_max: FILE_BYTES_MAX,
     }
 }
 
@@ -419,8 +410,7 @@ fn gather(
             }
             Sourced::Used(Kept::Unanswered) => {}
             Sourced::TooLarge(bytes) => {
-                let entry = ReadOutline::TooLarge(bytes);
-                let note = report::skipped(&source.path, &entry.entry());
+                let note = report::skipped(&source.path, &too_large(bytes));
                 gathered.notes.push_str(&note);
             }
             Sourced::NotText => {

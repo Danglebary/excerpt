@@ -16,6 +16,39 @@ fn outlined(items: Vec<Item>, first_error_line: Option<usize>) -> Outline {
     }
 }
 
+/// `outline` whole, with no item left out.
+fn whole(outline: Outline) -> Abridgment {
+    Abridgment {
+        outline,
+        left_out: 0,
+    }
+}
+
+/// A Rust file of the outline listing reads.
+fn rust_file<'file>(path: &'file str, abridgment: &'file Abridgment) -> File<'file> {
+    File {
+        path,
+        entry: Entry::Outlined {
+            language: Language::Rust,
+            abridgment,
+        },
+    }
+}
+
+/// The outline of `files` as the shell lists it: each file in order until the listing
+/// breaks, then the count of the files left.
+fn listed(files: &[File<'_>], items_max: usize) -> String {
+    let mut listing = Listing::new(items_max);
+    let mut taken: usize = 0;
+    for file in files {
+        taken = taken.checked_add(1).unwrap();
+        if listing.push(file).is_break() {
+            break;
+        }
+    }
+    listing.text(files.len().checked_sub(taken).unwrap())
+}
+
 mod given_an_item {
     use super::*;
 
@@ -46,34 +79,31 @@ mod given_outlines {
 
     #[test]
     fn when_rendered_then_each_file_lists_its_items_indented_by_nesting() {
-        let rust = outlined(
+        let rust = whole(outlined(
             vec![
                 item(Kind::Impl, &["Cursor"], 3, 9),
                 item(Kind::Fn, &["Cursor", "new"], 4, 6),
                 item(Kind::Fn, &["plan"], 11, 20),
             ],
             None,
-        );
-        let typescript = outlined(vec![item(Kind::Method, &["Service", "run"], 5, 7)], None);
+        ));
+        let typescript = whole(outlined(
+            vec![item(Kind::Method, &["Service", "run"], 5, 7)],
+            None,
+        ));
         let files = [
-            File {
-                path: "src/plan.rs",
-                entry: Entry::Outlined {
-                    language: Language::Rust,
-                    outline: &rust,
-                },
-            },
+            rust_file("src/plan.rs", &rust),
             File {
                 path: "web/service.ts",
                 entry: Entry::Outlined {
                     language: Language::TypeScript,
-                    outline: &typescript,
+                    abridgment: &typescript,
                 },
             },
         ];
 
         assert_eq!(
-            outline_text(&files, OUTLINE_ITEMS_MAX),
+            listed(&files, OUTLINE_ITEMS_MAX),
             "\
 src/plan.rs
   3-9 impl Cursor
@@ -87,66 +117,94 @@ web/service.ts
 
     #[test]
     fn when_rendered_holding_a_syntax_error_then_the_file_says_where() {
-        let broken = outlined(vec![item(Kind::Fn, &["ok"], 1, 1)], Some(3));
-        let files = [File {
-            path: "src/lib.rs",
-            entry: Entry::Outlined {
-                language: Language::Rust,
-                outline: &broken,
-            },
-        }];
+        let broken = whole(outlined(vec![item(Kind::Fn, &["ok"], 1, 1)], Some(3)));
+        let files = [rust_file("src/lib.rs", &broken)];
 
         assert_eq!(
-            outline_text(&files, OUTLINE_ITEMS_MAX),
+            listed(&files, OUTLINE_ITEMS_MAX),
             "src/lib.rs\n  1-1 fn ok\n  (a syntax error at line 3; items past it may be missing)\n"
         );
     }
 
     #[test]
     fn when_rendered_holding_no_items_then_the_file_says_so() {
-        let empty = outlined(Vec::new(), None);
-        let files = [File {
-            path: "src/lib.rs",
-            entry: Entry::Outlined {
-                language: Language::Rust,
-                outline: &empty,
-            },
-        }];
+        let empty = whole(outlined(Vec::new(), None));
+        let files = [rust_file("src/lib.rs", &empty)];
 
         assert_eq!(
-            outline_text(&files, OUTLINE_ITEMS_MAX),
+            listed(&files, OUTLINE_ITEMS_MAX),
             "src/lib.rs\n  (no items)\n"
         );
     }
 
     #[test]
-    fn when_rendered_past_the_bound_then_the_rest_are_counted_and_no_later_file_is_named() {
-        let first = outlined(
+    fn when_the_bound_falls_inside_a_file_then_its_items_past_it_and_the_later_files_are_counted() {
+        let first = whole(outlined(
             vec![item(Kind::Fn, &["a"], 1, 1), item(Kind::Fn, &["b"], 2, 2)],
             None,
-        );
-        let second = outlined(vec![item(Kind::Fn, &["c"], 1, 1)], None);
+        ));
+        let second = whole(outlined(vec![item(Kind::Fn, &["c"], 1, 1)], None));
         let files = [
+            rust_file("a.rs", &first),
+            rust_file("b.rs", &second),
             File {
-                path: "a.rs",
-                entry: Entry::Outlined {
-                    language: Language::Rust,
-                    outline: &first,
-                },
-            },
-            File {
-                path: "b.rs",
-                entry: Entry::Outlined {
-                    language: Language::Rust,
-                    outline: &second,
-                },
+                path: "c.rs",
+                entry: Entry::NotText,
             },
         ];
 
         assert_eq!(
-            outline_text(&files, 1),
-            "a.rs\n  1-1 fn a\n2 more items left out; outline a narrower path\n"
+            listed(&files, 1),
+            "a.rs\n  1-1 fn a\n  (1 more item left out)\n2 more files left out; outline a narrower path\n"
         );
+    }
+
+    #[test]
+    fn when_the_bound_falls_on_a_file_s_last_item_then_only_the_later_files_are_counted() {
+        let first = whole(outlined(vec![item(Kind::Fn, &["a"], 1, 1)], None));
+        let second = whole(outlined(vec![item(Kind::Fn, &["c"], 1, 1)], None));
+        let files = [rust_file("a.rs", &first), rust_file("b.rs", &second)];
+
+        assert_eq!(
+            listed(&files, 1),
+            "a.rs\n  1-1 fn a\n1 more file left out; outline a narrower path\n"
+        );
+    }
+
+    #[test]
+    fn when_the_last_file_reaches_the_bound_then_nothing_is_counted() {
+        let only = whole(outlined(vec![item(Kind::Fn, &["a"], 1, 1)], None));
+        let files = [rust_file("a.rs", &only)];
+
+        assert_eq!(listed(&files, 1), "a.rs\n  1-1 fn a\n");
+    }
+
+    #[test]
+    fn when_a_file_s_abridgment_left_items_out_then_its_note_counts_them() {
+        let abridged = Abridgment {
+            outline: outlined(vec![item(Kind::Fn, &["a"], 1, 1)], Some(9)),
+            left_out: 5,
+        };
+        let files = [rust_file("a.rs", &abridged)];
+
+        assert_eq!(
+            listed(&files, OUTLINE_ITEMS_MAX),
+            "a.rs\n  1-1 fn a\n  (5 more items left out)\n  (a syntax error at line 9; items past it may be missing)\n"
+        );
+    }
+
+    #[test]
+    fn when_files_are_pushed_then_the_listing_breaks_on_the_one_reaching_the_bound() {
+        let pair = whole(outlined(
+            vec![item(Kind::Fn, &["a"], 1, 1), item(Kind::Fn, &["b"], 2, 2)],
+            None,
+        ));
+        let file = rust_file("a.rs", &pair);
+        let mut listing = Listing::new(3);
+
+        let flows = [listing.push(&file), listing.push(&file)];
+
+        assert_eq!(flows, [ControlFlow::Continue(()), ControlFlow::Break(())]);
     }
 
     #[test]
@@ -160,9 +218,44 @@ web/service.ts
         }];
 
         assert_eq!(
-            outline_text(&files, OUTLINE_ITEMS_MAX),
+            listed(&files, OUTLINE_ITEMS_MAX),
             "src/generated.rs\n  (skipped: 20000000 bytes, more than the 16777216 excerpt reads)\n"
         );
+    }
+}
+
+mod given_an_outline {
+    use super::*;
+
+    #[test]
+    fn when_abridged_past_the_bound_then_its_first_items_are_kept_and_the_rest_counted() {
+        let items = vec![
+            item(Kind::Fn, &["a"], 1, 1),
+            item(Kind::Fn, &["b"], 2, 2),
+            item(Kind::Fn, &["c"], 3, 3),
+        ];
+
+        let abridgment = abridge(outlined(items, Some(7)), 2);
+
+        assert_eq!(
+            abridgment,
+            Abridgment {
+                outline: outlined(
+                    vec![item(Kind::Fn, &["a"], 1, 1), item(Kind::Fn, &["b"], 2, 2)],
+                    Some(7)
+                ),
+                left_out: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn when_abridged_within_the_bound_then_it_is_kept_whole() {
+        let items = vec![item(Kind::Fn, &["a"], 1, 1), item(Kind::Fn, &["b"], 2, 2)];
+
+        let abridgment = abridge(outlined(items.clone(), None), 2);
+
+        assert_eq!(abridgment, whole(outlined(items, None)));
     }
 }
 

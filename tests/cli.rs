@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::fs;
 
 use excerpt::parallel::{ATTEMPT_INPUT_BYTES_MAX, WORKERS_MAX};
-use excerpt::report::LISTED_MATCHES_MAX;
+use excerpt::report::{LISTED_MATCHES_MAX, OUTLINE_ITEMS_MAX};
 use support::{Scratch, run};
 
 #[cfg(test)]
@@ -161,6 +161,43 @@ mod given_outline {
 
         assert_eq!(code, 0);
         assert_eq!(stdout, "src/lib.rs\n  1-1 fn kept\n");
+    }
+
+    #[test]
+    fn when_run_on_more_items_than_the_bound_then_it_stops_in_the_file_reaching_it() {
+        let scratch = Scratch::new();
+        let items_per_file: usize = 300;
+        assert!(
+            OUTLINE_ITEMS_MAX > items_per_file,
+            "the first file fits the bound"
+        );
+        assert!(
+            OUTLINE_ITEMS_MAX < items_per_file.checked_mul(2).unwrap(),
+            "the second file reaches the bound"
+        );
+        let second_listed = OUTLINE_ITEMS_MAX.checked_sub(items_per_file).unwrap();
+        let second_left_out = items_per_file.checked_sub(second_listed).unwrap();
+        let mut expected = String::new();
+        for (file, listed) in [("a", items_per_file), ("b", second_listed), ("c", 0)] {
+            let mut text = String::new();
+            for line in 1..=items_per_file {
+                writeln!(text, "fn {file}_{line}() {{}}").unwrap();
+            }
+            scratch.write(&format!("src/{file}.rs"), &text);
+            if listed > 0 {
+                writeln!(expected, "src/{file}.rs").unwrap();
+            }
+            for line in 1..=listed {
+                writeln!(expected, "  {line}-{line} fn {file}_{line}").unwrap();
+            }
+        }
+        writeln!(expected, "  ({second_left_out} more items left out)").unwrap();
+        writeln!(expected, "1 more file left out; outline a narrower path").unwrap();
+
+        let (code, stdout, stderr) = run(&scratch, &["outline", "src"]);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(stdout, expected);
     }
 
     #[test]
