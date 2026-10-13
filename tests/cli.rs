@@ -326,6 +326,24 @@ mod given_show {
     }
 
     #[test]
+    fn when_more_items_answer_than_are_listed_then_every_one_is_counted() {
+        let scratch = Scratch::new();
+        let file_count = LISTED_MATCHES_MAX.checked_add(10).unwrap();
+        for file in 0..file_count {
+            scratch.write(&format!("src/file_{file:02}.rs"), "fn shared() {}\n");
+        }
+
+        let (code, _, stderr) = run(&scratch, &["show", "shared", "src"]);
+
+        assert_eq!(code, 1);
+        assert!(
+            stderr.starts_with(&format!("excerpt: {file_count} items answer `shared`;")),
+            "{stderr}"
+        );
+        assert!(stderr.ends_with("\n  and 10 more\n"), "{stderr}");
+    }
+
+    #[test]
     fn when_the_item_is_too_long_to_print_then_its_members_are_offered_and_it_exits_1() {
         let scratch = Scratch::new();
         let mut text = String::from("impl Huge {\n    fn first() {}\n");

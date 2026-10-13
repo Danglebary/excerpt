@@ -268,7 +268,7 @@ mod given_refusals {
             .map(|line| format!("src/lib.rs:{line}-{line} fn new"))
             .collect();
 
-        let message = several("new", &headers);
+        let message = several("new", &headers, headers.len());
 
         assert!(
             message.starts_with("excerpt: 22 items answer `new`;"),
@@ -280,6 +280,22 @@ mod given_refusals {
         );
         assert!(!message.contains("src/lib.rs:21-21"), "{message}");
         assert!(message.ends_with("  and 2 more\n"), "{message}");
+    }
+
+    #[test]
+    fn when_more_items_answer_than_were_kept_then_the_unkept_are_counted_among_the_rest() {
+        let headers: Vec<String> = (1..=LISTED_MATCHES_MAX)
+            .map(|line| format!("src/lib.rs:{line}-{line} fn new"))
+            .collect();
+        let count = LISTED_MATCHES_MAX + 10;
+
+        let message = several("new", &headers, count);
+
+        assert!(
+            message.starts_with("excerpt: 30 items answer `new`;"),
+            "{message}"
+        );
+        assert!(message.ends_with("  and 10 more\n"), "{message}");
     }
 
     #[test]

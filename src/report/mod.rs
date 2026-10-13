@@ -7,12 +7,16 @@ use crate::cli::UsageFault;
 use crate::item::{Item, Outline};
 use crate::language::{EXTENSIONS, Language};
 use crate::query::QueryFault;
-use crate::select::{ITEM_LINES_MAX, PRINTED_MATCHES_MAX};
+use crate::select::{ITEM_LINES_MAX, KEPT_MATCHES_MAX, PRINTED_MATCHES_MAX};
 
 /// The most items one outline lists before counting the rest.
 pub const OUTLINE_ITEMS_MAX: usize = 500;
 /// The most matches a refusal lists before counting the rest.
 pub const LISTED_MATCHES_MAX: usize = 20;
+const _: () = assert!(
+    LISTED_MATCHES_MAX <= KEPT_MATCHES_MAX,
+    "a refusal lists no more matches than are kept"
+);
 /// The indent of an outline's item at the top level, under its file's path.
 const OUTLINE_INDENT: &str = "  ";
 /// The width a printed line's number is right-aligned to, the Read tool's.
@@ -264,17 +268,20 @@ fn joined(lines: &[String]) -> String {
     text
 }
 
-/// Up to `LISTED_MATCHES_MAX` headers, indented under a refusal, and a count of the rest.
-fn listed(headers: &[String]) -> Vec<String> {
+/// Up to `LISTED_MATCHES_MAX` headers, indented under a refusal, and a count of the rest
+/// of `count`.
+fn listed(headers: &[String], count: usize) -> Vec<String> {
+    assert!(headers.len() <= count, "every header is counted");
     let mut lines: Vec<String> = headers
         .iter()
         .take(LISTED_MATCHES_MAX)
         .map(|header| format!("  {header}"))
         .collect();
-    if let Some(unlisted) = headers.len().checked_sub(LISTED_MATCHES_MAX) {
-        if unlisted > 0 {
-            lines.push(format!("  and {unlisted} more"));
-        }
+    let Some(unlisted) = count.checked_sub(lines.len()) else {
+        unreachable!("no more headers are listed than are counted");
+    };
+    if unlisted > 0 {
+        lines.push(format!("  and {unlisted} more"));
     }
     lines
 }
@@ -287,14 +294,14 @@ pub fn missing(name: &str, paths: &[String]) -> String {
     )
 }
 
-/// The refusal for a name several items answer, listing each up to the bound.
+/// The refusal for a name `count` items answer, listing `headers`, the first of them, up
+/// to the bound.
 #[must_use]
-pub fn several(name: &str, headers: &[String]) -> String {
+pub fn several(name: &str, headers: &[String], count: usize) -> String {
     let mut rendered = vec![format!(
-        "excerpt: {} items answer `{name}`; name one by its kind or a qualified name, or pass --all to print each:",
-        headers.len()
+        "excerpt: {count} items answer `{name}`; name one by its kind or a qualified name, or pass --all to print each:"
     )];
-    rendered.extend(listed(headers));
+    rendered.extend(listed(headers, count));
     joined(&rendered)
 }
 
@@ -315,7 +322,7 @@ pub fn too_long(header: &str, count: usize, member_headers: &[String]) -> String
         return format!("{opening}; read a range of it with the Read tool\n");
     }
     let mut rendered = vec![format!("{opening}; show one of its members:")];
-    rendered.extend(listed(member_headers));
+    rendered.extend(listed(member_headers, member_headers.len()));
     joined(&rendered)
 }
 

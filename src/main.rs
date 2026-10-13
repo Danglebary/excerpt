@@ -16,7 +16,7 @@ use excerpt::language::Language;
 use excerpt::parallel::{self, ATTEMPT_INPUT_BYTES_MAX, Attempt, Pool, Work};
 use excerpt::query::{self, Answer};
 use excerpt::report::{self, Entry, File, Listing, OUTLINE_ITEMS_MAX};
-use excerpt::select::{self, Match, Selection};
+use excerpt::select::{self, Found, Match, Selection};
 
 /// The largest file read; a larger one is named as skipped.
 const FILE_BYTES_MAX: u64 = 2_097_152;
@@ -329,11 +329,11 @@ enum Kept {
     Unanswered,
 }
 
-/// What `show` found across the files it read, in walk order: the files holding items
-/// that answer, those items, and the notes on files skipped or failed.
+/// What `show` found across the files it read, in walk order: the files holding the
+/// answering items it kept, the matches, and the notes on files skipped or failed.
 struct Gathered {
     loaded: Vec<Loaded>,
-    matches: Vec<Match>,
+    found: Found,
     notes: String,
     failed: bool,
 }
@@ -351,7 +351,7 @@ fn run_show(name: &str, all: bool, paths: &[String]) -> u8 {
         let answer = query.answer_in(source.language, &text);
         kept(answer, text)
     });
-    let selection = select::select(gathered.matches, all);
+    let selection = select::select(gathered.found, all);
     let (printed, refusal) = render_selection(name, paths, &gathered.loaded, selection);
     let mut notes = gathered.notes;
     notes.push_str(&refusal);
@@ -377,8 +377,8 @@ fn kept(answer: Answer, text: String) -> Kept {
     }
 }
 
-/// Every source's answer in walk order, each answering item numbered by its file's place
-/// among the files kept.
+/// Every source's answer in walk order, each answering item kept numbered by its file's
+/// place among the files kept; a file holding no kept item is dropped with its text.
 fn gather(
     collected: Collected,
     answer_source: impl Fn(&Source, String) -> Kept + Sync,
@@ -386,7 +386,7 @@ fn gather(
     let failed = !collected.failures.is_empty();
     let mut gathered = Gathered {
         loaded: Vec::new(),
-        matches: Vec::new(),
+        found: Found::default(),
         notes: collected.failures,
         failed,
     };
@@ -398,15 +398,14 @@ fn gather(
                 text,
             }) => {
                 let file = gathered.loaded.len();
-                for item in items {
-                    gathered.matches.push(Match { file, item });
+                if gathered.found.add(file, &items) {
+                    gathered.loaded.push(Loaded {
+                        path: source.path.clone(),
+                        language: source.language,
+                        outline,
+                        text,
+                    });
                 }
-                gathered.loaded.push(Loaded {
-                    path: source.path.clone(),
-                    language: source.language,
-                    outline,
-                    text,
-                });
             }
             Sourced::Used(Kept::Unanswered) => {}
             Sourced::TooLarge(bytes) => {
@@ -440,8 +439,8 @@ fn render_selection(
         Selection::Print(chosen) => {
             let mut printed = Vec::new();
             let mut refusal = String::new();
-            for found in chosen {
-                let (file, item) = resolve(loaded, found);
+            for matched in chosen {
+                let (file, item) = resolve(loaded, matched);
                 if select::printable(item) {
                     printed.push(report::item_text(
                         &file.path,
@@ -450,21 +449,21 @@ fn render_selection(
                         &file.text,
                     ));
                 } else {
-                    refusal.push_str(&too_long(file, found.item));
+                    refusal.push_str(&too_long(file, matched.item));
                 }
             }
             (printed.join("\n"), refusal)
         }
         Selection::Missing => (String::new(), report::missing(name, paths)),
-        Selection::Several(chosen) => {
-            let headers: Vec<String> = chosen
+        Selection::Several { matches, count } => {
+            let headers: Vec<String> = matches
                 .into_iter()
-                .map(|found| {
-                    let (file, item) = resolve(loaded, found);
+                .map(|matched| {
+                    let (file, item) = resolve(loaded, matched);
                     report::header(&file.path, file.language, item)
                 })
                 .collect();
-            (String::new(), report::several(name, &headers))
+            (String::new(), report::several(name, &headers, count))
         }
         Selection::TooMany(count) => (String::new(), report::too_many(name, count)),
     }
