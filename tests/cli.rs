@@ -74,6 +74,9 @@ impl Plan {
 pub fn apply(plan: &Plan) {}
 ";
 
+/// The largest file the binary reads, 2 MiB.
+const FILE_BYTES_MAX: usize = 2_097_152;
+
 mod given_outline {
     use super::*;
 
@@ -169,6 +172,26 @@ mod given_outline {
 
         assert_eq!(code, 0);
         assert_eq!(stdout, "binary.rs\n  (skipped: not UTF-8 text)\n");
+    }
+
+    #[test]
+    fn when_run_on_a_file_larger_than_the_read_bound_then_it_is_named_as_skipped() {
+        let scratch = Scratch::new();
+        let filler = "// generated\n";
+        let filler_count = (FILE_BYTES_MAX / filler.len()).checked_add(1).unwrap();
+        let large = filler.repeat(filler_count);
+        scratch.write("src/generated.rs", &large);
+        let bytes = large.len();
+
+        let (code, stdout, stderr) = run(&scratch, &["outline", "src/generated.rs"]);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(
+            stdout,
+            format!(
+                "src/generated.rs\n  (skipped: {bytes} bytes, more than the {FILE_BYTES_MAX} excerpt reads)\n"
+            )
+        );
     }
 }
 

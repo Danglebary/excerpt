@@ -18,7 +18,7 @@ use excerpt::report::{self, Entry, File, OUTLINE_ITEMS_MAX};
 use excerpt::select::{self, Match, Selection};
 
 /// The largest file read; a larger one is named as skipped.
-const FILE_BYTES_MAX: u64 = 16_777_216;
+const FILE_BYTES_MAX: u64 = 2_097_152;
 /// The most source files one call reads.
 const FILES_MAX: usize = 20_000;
 /// The most directory entries one call walks, source files or not.
