@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
+use std::num::NonZeroUsize;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -11,7 +12,8 @@ use excerpt::cli::{self, Command};
 use excerpt::exit_code;
 use excerpt::item::{self, Outline};
 use excerpt::language::Language;
-use excerpt::query;
+use excerpt::parallel::{self, Attempt, FIRST_PASS_INPUT_BYTES_MAX, Passes, Pool};
+use excerpt::query::{self, Answer};
 use excerpt::report::{self, Entry, File, OUTLINE_ITEMS_MAX};
 use excerpt::select::{self, Match, Selection};
 
@@ -23,6 +25,11 @@ const FILES_MAX: usize = 20_000;
 const ENTRIES_MAX: usize = 1_000_000;
 /// The prefix a walk from the working directory puts on every path, which says nothing.
 const WORKING_DIRECTORY_PREFIX: &str = "./";
+
+/// mimalloc serves every allocation the process makes on musl.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
@@ -45,11 +52,27 @@ struct Source {
     language: Language,
 }
 
-/// What reading one file gave.
+/// A source file opened for reading, or the size that keeps it closed.
+enum Opened {
+    File { file: fs::File, bytes: u64 },
+    TooLarge(u64),
+}
+
+/// What reading an opened file gave.
 enum Contents {
     Text(String),
+    NotText,
+    /// The file holds more bytes than the read allowed, having grown since its size was
+    /// read.
+    Longer,
+}
+
+/// What became of one source file: what was made of its text, or why it has none.
+enum Sourced<T> {
+    Used(T),
     TooLarge(u64),
     NotText,
+    Failed(io::Error),
 }
 
 /// The source files under the paths, in walk order, or the code and message that end the
@@ -138,17 +161,99 @@ fn shown_path(path: &Path) -> String {
     }
 }
 
-fn read_source(path: &str) -> io::Result<Contents> {
+fn open_source(path: &str) -> io::Result<Opened> {
     let file = fs::File::open(path)?;
     let bytes = file.metadata()?.len();
     if bytes > FILE_BYTES_MAX {
-        return Ok(Contents::TooLarge(bytes));
+        return Ok(Opened::TooLarge(bytes));
     }
+    Ok(Opened::File { file, bytes })
+}
+
+/// Reads up to `bytes_max` bytes of an opened file, telling a file that holds more apart.
+fn read_contents(file: &fs::File, bytes_max: u64) -> io::Result<Contents> {
+    let Some(read_max) = bytes_max.checked_add(1) else {
+        unreachable!("a byte bound is below u64::MAX");
+    };
     let mut buffer = Vec::new();
-    file.take(FILE_BYTES_MAX).read_to_end(&mut buffer)?;
+    file.take(read_max).read_to_end(&mut buffer)?;
+    let Ok(read_bytes) = u64::try_from(buffer.len()) else {
+        unreachable!("a buffer's length fits a u64");
+    };
+    if read_bytes > bytes_max {
+        return Ok(Contents::Longer);
+    }
     match String::from_utf8(buffer) {
         Ok(text) => Ok(Contents::Text(text)),
         Err(_) => Ok(Contents::NotText),
+    }
+}
+
+/// One source file read and its text handed to `use_text`, or why it has no text.
+fn use_source<T>(source: &Source, use_text: &impl Fn(&Source, String) -> T) -> Sourced<T> {
+    let file = match open_source(&source.path) {
+        Ok(Opened::File { file, .. }) => file,
+        Ok(Opened::TooLarge(bytes)) => return Sourced::TooLarge(bytes),
+        Err(error) => return Sourced::Failed(error),
+    };
+    match read_contents(&file, FILE_BYTES_MAX) {
+        Ok(Contents::Text(text)) => Sourced::Used(use_text(source, text)),
+        Ok(Contents::NotText) => Sourced::NotText,
+        Ok(Contents::Longer) => grown(&file),
+        Err(error) => Sourced::Failed(error),
+    }
+}
+
+/// A file that grew past `FILE_BYTES_MAX` after its size was read, by the size it has now.
+fn grown<T>(file: &fs::File) -> Sourced<T> {
+    match file.metadata() {
+        Ok(metadata) => Sourced::TooLarge(metadata.len()),
+        Err(error) => Sourced::Failed(error),
+    }
+}
+
+/// As `use_source`, except that a file the first pass defers is left unread.
+fn attempt_source<T>(
+    source: &Source,
+    use_text: &impl Fn(&Source, String) -> T,
+) -> Attempt<Sourced<T>> {
+    let file = match open_source(&source.path) {
+        Ok(Opened::File { file, bytes }) => {
+            if parallel::first_pass_defers(bytes) {
+                return Attempt::Deferred;
+            }
+            file
+        }
+        Ok(Opened::TooLarge(bytes)) => return Attempt::Done(Sourced::TooLarge(bytes)),
+        Err(error) => return Attempt::Done(Sourced::Failed(error)),
+    };
+    match read_contents(&file, FIRST_PASS_INPUT_BYTES_MAX) {
+        Ok(Contents::Text(text)) => Attempt::Done(Sourced::Used(use_text(source, text))),
+        Ok(Contents::NotText) => Attempt::Done(Sourced::NotText),
+        Ok(Contents::Longer) => Attempt::Deferred,
+        Err(error) => Attempt::Done(Sourced::Failed(error)),
+    }
+}
+
+/// Every source's outcome, in walk order, the files the first pass defers read on the
+/// second, since a parse's memory grows with its file.
+fn use_sources<T: Send>(
+    sources: &[Source],
+    use_text: impl Fn(&Source, String) -> T + Sync,
+) -> Vec<Sourced<T>> {
+    let pool = Pool::new(available_threads());
+    let passes = Passes {
+        first: |source: &Source| attempt_source(source, &use_text),
+        second: |source: &Source| use_source(source, &use_text),
+    };
+    pool.map_in_two_passes(sources, passes)
+}
+
+/// The threads the machine offers this process, or one where it cannot say.
+fn available_threads() -> NonZeroUsize {
+    match std::thread::available_parallelism() {
+        Ok(available) => available,
+        Err(_) => NonZeroUsize::MIN,
     }
 }
 
@@ -157,16 +262,22 @@ fn run_outline(paths: &[String]) -> u8 {
         Ok(collected) => collected,
         Err((code, message)) => return emit("", &message, code),
     };
+    let sourced = use_sources(&collected.sources, |source, text| {
+        item::outline(source.language, &text)
+    });
+    assert_eq!(
+        sourced.len(),
+        collected.sources.len(),
+        "every source has an outcome"
+    );
     let mut failures = collected.failures;
     let mut read: Vec<(String, ReadOutline)> = Vec::new();
-    for source in collected.sources {
-        let state = match read_source(&source.path) {
-            Ok(Contents::Text(text)) => {
-                ReadOutline::Outlined(source.language, item::outline(source.language, &text))
-            }
-            Ok(Contents::TooLarge(bytes)) => ReadOutline::TooLarge(bytes),
-            Ok(Contents::NotText) => ReadOutline::NotText,
-            Err(error) => {
+    for (source, outcome) in collected.sources.into_iter().zip(sourced) {
+        let state = match outcome {
+            Sourced::Used(outline) => ReadOutline::Outlined(source.language, outline),
+            Sourced::TooLarge(bytes) => ReadOutline::TooLarge(bytes),
+            Sourced::NotText => ReadOutline::NotText,
+            Sourced::Failed(error) => {
                 failures.push_str(&report::read_failure(&source.path, &error.to_string()));
                 continue;
             }
@@ -220,6 +331,26 @@ struct Loaded {
     text: String,
 }
 
+/// One file's answer to the name `show` asks for, keeping the text only where items answer,
+/// since those are printed from it.
+enum Kept {
+    Answered {
+        outline: Outline,
+        items: Vec<usize>,
+        text: String,
+    },
+    Unanswered,
+}
+
+/// What `show` found across the files it read, in walk order: the files holding items
+/// that answer, those items, and the notes on files skipped or failed.
+struct Gathered {
+    loaded: Vec<Loaded>,
+    matches: Vec<Match>,
+    notes: String,
+    failed: bool,
+}
+
 fn run_show(name: &str, all: bool, paths: &[String]) -> u8 {
     let query = match query::parse(name) {
         Ok(query) => query,
@@ -229,57 +360,16 @@ fn run_show(name: &str, all: bool, paths: &[String]) -> u8 {
         Ok(collected) => collected,
         Err((code, message)) => return emit("", &message, code),
     };
-    let mut notes = collected.failures;
-    let mut failed = !notes.is_empty();
-    let mut loaded: Vec<Loaded> = Vec::new();
-    let mut matches: Vec<Match> = Vec::new();
-    for source in collected.sources {
-        let text = match read_source(&source.path) {
-            Ok(Contents::Text(text)) => text,
-            Ok(Contents::TooLarge(bytes)) => {
-                let entry = ReadOutline::TooLarge(bytes);
-                notes.push_str(&report::skipped(&source.path, &entry.entry()));
-                continue;
-            }
-            Ok(Contents::NotText) => {
-                notes.push_str(&report::skipped(&source.path, &Entry::NotText));
-                continue;
-            }
-            Err(error) => {
-                notes.push_str(&report::read_failure(&source.path, &error.to_string()));
-                failed = true;
-                continue;
-            }
-        };
-        if !query.may_answer_in(&text) {
-            continue;
-        }
-        let outline = item::outline(source.language, &text);
-        let answering: Vec<usize> = (0..outline.items.len())
-            .filter(|index| {
-                outline
-                    .items
-                    .get(*index)
-                    .is_some_and(|item| query.answers(item))
-            })
-            .collect();
-        if answering.is_empty() {
-            continue;
-        }
-        let file = loaded.len();
-        for item in answering {
-            matches.push(Match { file, item });
-        }
-        loaded.push(Loaded {
-            path: source.path,
-            language: source.language,
-            outline,
-            text,
-        });
-    }
-    let (printed, refusal) = render_selection(name, paths, &loaded, select::select(matches, all));
+    let sourced = use_sources(&collected.sources, |source, text| {
+        let answer = query.answer_in(source.language, &text);
+        kept(answer, text)
+    });
+    let gathered = gather(collected, sourced);
+    let selection = select::select(gathered.matches, all);
+    let (printed, refusal) = render_selection(name, paths, &gathered.loaded, selection);
+    let mut notes = gathered.notes;
     notes.push_str(&refusal);
-    let code = if failed {
+    let code = if gathered.failed {
         exit_code::IO
     } else if refusal.is_empty() {
         exit_code::SUCCESS
@@ -287,6 +377,71 @@ fn run_show(name: &str, all: bool, paths: &[String]) -> u8 {
         exit_code::REFUSED
     };
     emit(&printed, &notes, code)
+}
+
+/// A file's answer to the name, kept with its text where items answer.
+fn kept(answer: Answer, text: String) -> Kept {
+    match answer {
+        Answer::Answered { outline, items } => Kept::Answered {
+            outline,
+            items,
+            text,
+        },
+        Answer::Screened | Answer::Unanswered => Kept::Unanswered,
+    }
+}
+
+/// Every file's outcome joined to its source in walk order, each answering item numbered
+/// by its file's place among the files kept.
+fn gather(collected: Collected, sourced: Vec<Sourced<Kept>>) -> Gathered {
+    assert_eq!(
+        sourced.len(),
+        collected.sources.len(),
+        "every source has an outcome"
+    );
+    let failed = !collected.failures.is_empty();
+    let mut gathered = Gathered {
+        loaded: Vec::new(),
+        matches: Vec::new(),
+        notes: collected.failures,
+        failed,
+    };
+    for (source, outcome) in collected.sources.into_iter().zip(sourced) {
+        match outcome {
+            Sourced::Used(Kept::Answered {
+                outline,
+                items,
+                text,
+            }) => {
+                let file = gathered.loaded.len();
+                for item in items {
+                    gathered.matches.push(Match { file, item });
+                }
+                gathered.loaded.push(Loaded {
+                    path: source.path,
+                    language: source.language,
+                    outline,
+                    text,
+                });
+            }
+            Sourced::Used(Kept::Unanswered) => {}
+            Sourced::TooLarge(bytes) => {
+                let entry = ReadOutline::TooLarge(bytes);
+                let note = report::skipped(&source.path, &entry.entry());
+                gathered.notes.push_str(&note);
+            }
+            Sourced::NotText => {
+                let note = report::skipped(&source.path, &Entry::NotText);
+                gathered.notes.push_str(&note);
+            }
+            Sourced::Failed(error) => {
+                let note = report::read_failure(&source.path, &error.to_string());
+                gathered.notes.push_str(&note);
+                gathered.failed = true;
+            }
+        }
+    }
+    gathered
 }
 
 /// What `show` prints for a selection, and the refusal it reports, empty when there is

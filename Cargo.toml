@@ -19,6 +19,16 @@ tree-sitter = "0.27.1"
 tree-sitter-rust = "0.24.2"
 tree-sitter-typescript = "0.23.2"
 
+# On musl, the allocator for every allocation, tree-sitter's C ones included: the
+# `override` feature defines `malloc` and the functions beside it, which the linker
+# resolves in place of the C library's. musl's own allocator takes one process-wide lock
+# on every call, which serializes parsing across threads, and std offers no other
+# allocator. On glibc mimalloc's startup costs more than it saves on the calls most made,
+# so the C library's allocator serves there.
+# https://git.musl-libc.org/cgit/musl/tree/src/malloc/mallocng/glue.h — checked 2026-10-11
+[target.'cfg(target_env = "musl")'.dependencies]
+mimalloc = { version = "0.1.52", default-features = false, features = ["override"] }
+
 # Criterion's default features add rayon and plotters, which parallelize its analysis
 # and draw its charts; the benches read neither, so only its cargo harness is taken.
 [dev-dependencies]

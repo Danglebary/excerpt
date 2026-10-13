@@ -1,6 +1,7 @@
 # The Rust half of the gate and the flake's package build, on every pull request and
-# every push to main, on Linux and macOS, since the binary ships for both. rustup
-# installs the toolchain that `rust-toolchain.toml` pins the first time cargo runs.
+# every push to main, on Linux and macOS, since the binary ships for both, and the gate
+# again for the musl target the Linux release is built for. rustup installs the toolchain
+# that `rust-toolchain.toml` pins the first time cargo runs.
 name: CI
 
 on:
@@ -27,6 +28,27 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
         run: cargo test --locked
+
+  # The musl target, whose code `check` never compiles: on musl the binary takes mimalloc
+  # as its allocator, so the lints and the tests run for that target too.
+  musl:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    # The grammars and mimalloc are C that the cc crate compiles, so the target names
+    # musl-gcc, the compiler wrapper musl-tools installs, rather than leaving cc to pick one.
+    # https://docs.rs/cc/latest/cc/#external-configuration-via-environment-variables — checked 2026-10-10
+    env:
+      CC_x86_64_unknown_linux_musl: musl-gcc
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the musl compiler
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Add the target
+        run: rustup target add x86_64-unknown-linux-musl
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --target x86_64-unknown-linux-musl -- -D warnings
+      - name: Test
+        run: cargo test --locked --target x86_64-unknown-linux-musl
 
   # The flake's package, built inside the Nix sandbox from the file set `flake.nix`
   # lists, where `check` builds from the whole checkout.

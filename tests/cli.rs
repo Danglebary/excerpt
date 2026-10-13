@@ -6,6 +6,8 @@
 use std::fmt::Write as _;
 use std::fs;
 
+use excerpt::parallel::{FIRST_PASS_INPUT_BYTES_MAX, WORKERS_MAX};
+use excerpt::report::LISTED_MATCHES_MAX;
 use support::{Scratch, run};
 
 #[cfg(test)]
@@ -103,6 +105,48 @@ mod given_outline {
     }
 
     #[test]
+    fn when_run_on_more_files_than_workers_then_they_are_outlined_in_name_order() {
+        let scratch = Scratch::new();
+        let file_count = WORKERS_MAX.checked_mul(3).unwrap();
+        let mut expected = String::new();
+        for file in 0..file_count {
+            let name = format!("src/file_{file:02}.rs");
+            scratch.write(&name, &format!("fn item_{file}() {{}}\n"));
+            writeln!(expected, "{name}\n  1-1 fn item_{file}").unwrap();
+        }
+
+        let (code, stdout, stderr) = run(&scratch, &["outline", "src"]);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(stdout, expected);
+    }
+
+    #[test]
+    fn when_run_on_a_file_the_first_pass_defers_then_it_keeps_its_place_in_name_order() {
+        let scratch = Scratch::new();
+        scratch.write("src/a.rs", "fn a() {}\n");
+        scratch.write("src/c.rs", "fn c() {}\n");
+        let filler = "    // filler\n";
+        let bytes_max = usize::try_from(FIRST_PASS_INPUT_BYTES_MAX).unwrap();
+        let filler_count = (bytes_max / filler.len()).checked_add(1).unwrap();
+        let mut large = String::from("fn b() {\n");
+        for _ in 0..filler_count {
+            large.push_str(filler);
+        }
+        large.push_str("}\n");
+        scratch.write("src/b.rs", &large);
+        let last_line = filler_count.checked_add(2).unwrap();
+
+        let (code, stdout, stderr) = run(&scratch, &["outline", "src"]);
+
+        assert_eq!(code, 0, "{stderr}");
+        assert_eq!(
+            stdout,
+            format!("src/a.rs\n  1-1 fn a\nsrc/b.rs\n  1-{last_line} fn b\nsrc/c.rs\n  1-1 fn c\n")
+        );
+    }
+
+    #[test]
     fn when_run_on_the_working_directory_then_ignored_and_hidden_files_are_skipped() {
         let scratch = Scratch::new();
         scratch.write(".gitignore", "target/\n");
@@ -195,6 +239,33 @@ mod given_show {
     }
 
     #[test]
+    fn when_items_in_more_files_than_workers_answer_then_they_are_listed_in_name_order() {
+        let scratch = Scratch::new();
+        let file_count = WORKERS_MAX.checked_mul(3).unwrap();
+        // Each file holds the item on a line of its own, so a file listed with another
+        // file's outcome shows the wrong lines.
+        for file in 0..file_count {
+            let text = format!("{}fn shared() {{}}\n", "\n".repeat(file));
+            scratch.write(&format!("src/file_{file:02}.rs"), &text);
+        }
+
+        let (code, _, stderr) = run(&scratch, &["show", "shared", "src"]);
+
+        assert_eq!(code, 1);
+        let listed: Vec<&str> = stderr
+            .lines()
+            .filter(|line| line.starts_with("  src/"))
+            .collect();
+        let expected: Vec<String> = (0..LISTED_MATCHES_MAX)
+            .map(|file| {
+                let line = file.checked_add(1).unwrap();
+                format!("  src/file_{file:02}.rs:{line}-{line} fn shared")
+            })
+            .collect();
+        assert_eq!(listed, expected);
+    }
+
+    #[test]
     fn when_the_item_is_too_long_to_print_then_its_members_are_offered_and_it_exits_1() {
         let scratch = Scratch::new();
         let mut text = String::from("impl Huge {\n    fn first() {}\n");
@@ -280,5 +351,87 @@ mod given_the_command_line {
 
         assert_eq!(code, 0);
         assert_eq!(stdout, format!("excerpt {}\n", env!("CARGO_PKG_VERSION")));
+    }
+}
+
+#[cfg(target_env = "musl")]
+mod given_musl {
+    use std::process::Command;
+
+    use super::*;
+
+    /// Items in the generated file: enough that its parse holds most of the process's
+    /// memory.
+    const ITEM_COUNT: usize = 15_000;
+    /// The least share of the process's peak memory mimalloc must have committed: most of
+    /// it, which holds only when the parse's allocations are mimalloc's.
+    const COMMITTED_SHARE_MIN: f64 = 0.5;
+
+    #[test]
+    fn when_a_large_file_is_parsed_then_mimalloc_commits_most_of_the_memory() {
+        let scratch = Scratch::new();
+        let mut text = String::from("impl Items {\n");
+        for index in 0..ITEM_COUNT {
+            writeln!(
+                text,
+                "    /// Item {index}.\n    fn item_{index}() {{\n        let value = {index};\n    }}"
+            )
+            .unwrap();
+        }
+        text.push_str("}\n");
+        scratch.write("items.rs", &text);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_excerpt"))
+            .args(["outline", "items.rs"])
+            .env("MIMALLOC_SHOW_STATS", "1")
+            .current_dir(&scratch.root)
+            .output()
+            .unwrap();
+
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let peak_rss = statistic(&stderr, "peak rss: ");
+        let peak_commit = statistic(&stderr, "peak commit: ");
+        assert!(peak_commit >= peak_rss * COMMITTED_SHARE_MIN, "{stderr}");
+    }
+
+    /// The size mimalloc's statistics print after `label`, such as `46.7 MiB`, in bytes.
+    #[cfg(test)]
+    fn statistic(stderr: &str, label: &str) -> f64 {
+        let (_, after) = stderr
+            .split_once(label)
+            .unwrap_or_else(|| panic!("mimalloc prints `{label}`:\n{stderr}"));
+        let mut words = after.split_whitespace();
+        let number: f64 = words.next().unwrap().parse().unwrap();
+        let unit = words.next().unwrap().trim_end_matches(',');
+        let scale = match unit {
+            "B" => 1.0,
+            "KiB" => 1_024.0,
+            "MiB" => 1_048_576.0,
+            "GiB" => 1_073_741_824.0,
+            other => panic!("`{other}` is a unit mimalloc prints"),
+        };
+        number * scale
+    }
+}
+
+#[cfg(not(target_env = "musl"))]
+mod given_another_c_library {
+    use std::process::Command;
+
+    use super::*;
+
+    #[test]
+    fn when_run_asking_mimalloc_for_statistics_then_none_print() {
+        let scratch = Scratch::new();
+        scratch.write("plan.rs", PLAN);
+
+        let output = Command::new(env!("CARGO_BIN_EXE_excerpt"))
+            .args(["outline", "plan.rs"])
+            .env("MIMALLOC_SHOW_STATS", "1")
+            .current_dir(&scratch.root)
+            .output()
+            .unwrap();
+
+        assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
     }
 }

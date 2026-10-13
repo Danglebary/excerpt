@@ -1,7 +1,8 @@
 //! The name a reader asks `show` for: an item's name, optionally qualified by the names it
 //! sits in and led by the keyword of its kind, exactly as an outline prints it.
 
-use crate::item::{Item, Kind};
+use crate::item::{self, Item, Kind, Outline};
+use crate::language::Language;
 
 /// The separators a name's segments are split at: Rust's path separator and the dot of
 /// TypeScript's, since no name in either language holds the other's.
@@ -19,6 +20,18 @@ pub struct Query {
 pub enum QueryFault {
     Empty,
     EmptySegment(String),
+}
+
+/// What a file's text holds for a name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    /// The text lacks a word of the name, so it was not parsed.
+    Screened,
+    /// No item of the text answers the name.
+    Unanswered,
+    /// The text's outline and the indexes of the items answering the name, in document
+    /// order and never empty.
+    Answered { outline: Outline, items: Vec<usize> },
 }
 
 /// Parses the text a reader passed as a name.
@@ -100,6 +113,34 @@ impl Query {
             }
         }
         item.path().ends_with(&self.segments)
+    }
+
+    /// What `text`, written in `language`, holds for this name. The text is parsed only
+    /// when it holds every word of the name.
+    ///
+    /// # Panics
+    ///
+    /// When an index taken for an answering item names no item of the outline.
+    #[must_use]
+    pub fn answer_in(&self, language: Language, text: &str) -> Answer {
+        if !self.may_answer_in(text) {
+            return Answer::Screened;
+        }
+        let outline = item::outline(language, text);
+        let mut items = Vec::new();
+        for (index, item) in outline.items.iter().enumerate() {
+            if self.answers(item) {
+                items.push(index);
+            }
+        }
+        if items.is_empty() {
+            return Answer::Unanswered;
+        }
+        assert!(
+            items.iter().all(|index| *index < outline.items.len()),
+            "an answering index names an item of the outline"
+        );
+        Answer::Answered { outline, items }
     }
 }
 

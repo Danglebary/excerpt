@@ -16,6 +16,11 @@ const SAMPLE_COUNT: usize = 10;
 const WARM_UP_SECONDS: u64 = 1;
 const MEASUREMENT_SECONDS: u64 = 3;
 
+/// mimalloc on musl, the allocator each case's parse is timed under there.
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// A language, and one container of `count` small items in it, which outline to
 /// `count` + 1 items.
 struct Case {
