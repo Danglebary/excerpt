@@ -6,6 +6,7 @@
 
 pub mod cli;
 pub mod exit_code;
+pub mod guard;
 pub mod item;
 pub mod language;
 pub mod parallel;

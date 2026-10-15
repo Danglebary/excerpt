@@ -1,6 +1,6 @@
 # excerpt
 
-A static Rust binary that prints a source file's outline, or one of its items whole by name, and a Claude Code plugin (a skill) that routes agents to it. `README.md` says what it is for; `excerpt --help`, generated from `src/report/mod.rs`, is the grammar.
+A static Rust binary that prints a source file's outline, or one of its items whole by name, and a Claude Code plugin (a skill and a hook) that routes agents to it. `README.md` says what it is for; `excerpt --help`, generated from `src/report/mod.rs`, is the grammar.
 
 The engineering style guide at `~/.claude/CLAUDE.md` governs. This file states only what is specific to this repository.
 
@@ -16,7 +16,7 @@ The toolchain is pinned once, in `rust-toolchain.toml`, which both the flake and
 
 ## Shape
 
-`src/lib.rs` is the functional core and does no IO: the languages and their extensions (`language`), parsing a file's text into its items (`item`, with one classifier per language beside it), the name a reader asks for and which items answer it (`query`), what `show` prints of the matches (`select`), the argument grammar (`cli`), every message (`report`), spreading work over threads in order (`parallel`), and the exit codes (`exit_code`). `src/main.rs` is the shell: it walks the paths, reads the files under a size bound, prints what the library rendered, and maps outcomes to exit codes. A new decision goes in the library with a unit test; `main.rs` holds wiring, which `tests/cli.rs` covers against real files.
+`src/lib.rs` is the functional core and does no IO: the languages and their extensions (`language`), parsing a file's text into its items (`item`, with one classifier per language beside it), the name a reader asks for and which items answer it (`query`), what `show` prints of the matches (`select`), the hook's verdict on a Bash command (`guard`), the argument grammar (`cli`), every message (`report`), spreading work over threads in order (`parallel`), and the exit codes (`exit_code`). `src/main.rs` is the shell: it walks the paths, reads the files and the hook's input under a size bound, prints what the library rendered, and maps outcomes to exit codes. A new decision goes in the library with a unit test; `main.rs` holds wiring, which `tests/cli.rs` covers against real files.
 
 An item's lines run from the first comment or attribute directly above it, with no blank line between, to its last line; a comment trailing code on its own first line and a `//!` module doc belong to no item. Every word of an item's qualified name is text of its file, which is what lets `show` skip parsing a file that lacks a word of the name; a classifier that names an item with text the file does not hold breaks that screen, and the screen's soundness rows in `src/query/tests.rs` are where such a classifier must add a row.
 
@@ -27,6 +27,8 @@ The lint table denies `unwrap`, `expect`, `panic!`, indexing, slicing, string sl
 A test is a function named `when_<operation>_then_<result>` in a module named `given_<input>`, and each test file opens with its goal and method as a `//!` comment. Each case asserts on a returned value, a refusal's reason, or what the binary printed; the `report` tests read messages because a message is what that module produces. The `item` tests state a whole outline per case, one row per item, so an item found or lost by mistake fails the case.
 
 `tests/documents.rs` holds the plugin manifest's version equal to the crate's and parses every `excerpt` command the skill and the README show, names included, so neither can drift from the grammar.
+
+The hook's verdict was checked against every Bash command in this machine's Claude Code transcripts; when `guard` changes, rerun that check rather than trusting the unit rows alone: feed each command through `excerpt guard` as hook JSON and read what it blocks.
 
 The README's measured problem comes from this machine's Claude Code transcripts: every Bash call joined to its result, counting `sed -n A,Bp` range reads, `grep -n` calls followed directly by a `sed -n` call, and range reads of a file read within the three calls before. Redo the count when the README's numbers are touched, and rerun it after the plugin has been in use to see whether those numbers fell.
 

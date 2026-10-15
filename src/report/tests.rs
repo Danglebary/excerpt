@@ -320,3 +320,122 @@ mod given_refusals {
         );
     }
 }
+
+mod given_a_guard_denial {
+    use super::*;
+    use crate::cli::{Command, parse_arguments};
+    use crate::guard::{Denial, Reader};
+
+    fn denial(reader: Reader, path: &str) -> Denial {
+        Denial {
+            reader,
+            path: path.to_owned(),
+        }
+    }
+
+    #[test]
+    fn when_rendered_then_it_names_the_read_and_offers_outline_and_show_on_its_path() {
+        let message = guard_denial(&denial(Reader::SedRange, "'my plan.rs'"));
+
+        assert_eq!(
+            message,
+            "excerpt guard: blocked a `sed -n` line-range read of 'my plan.rs'.\n\
+             Read code by item instead:\n\
+             \x20 excerpt outline 'my plan.rs'\n\
+             \x20 excerpt show NAME 'my plan.rs'\n\
+             `outline` lists every item in the file with the lines it spans; `show` prints \
+             the one NAME names, whole, NAME written as the outline prints it. A line no item \
+             holds, such as an import or the line a compiler error names, is read with the \
+             Read tool's offset and limit.\n"
+        );
+    }
+
+    #[test]
+    fn when_rendered_for_each_reader_then_it_names_that_reader() {
+        let rows = [
+            (Reader::SedRange, "a `sed -n` line-range read"),
+            (Reader::Head, "a `head` read"),
+            (Reader::Tail, "a `tail` read"),
+            (Reader::Cat, "a `cat` read"),
+        ];
+        for (reader, read) in rows {
+            let message = guard_denial(&denial(reader, "src/plan.rs"));
+
+            let headline = format!("excerpt guard: blocked {read} of src/plan.rs.\n");
+            assert!(message.starts_with(&headline), "{message}");
+        }
+    }
+
+    #[test]
+    fn when_rendered_then_every_command_it_offers_parses_against_the_grammar() {
+        let message = guard_denial(&denial(Reader::Cat, "src/plan.rs"));
+
+        let offered: Vec<Vec<String>> = message
+            .lines()
+            .filter_map(|line| line.strip_prefix("  excerpt "))
+            .map(|arguments| arguments.split_whitespace().map(str::to_owned).collect())
+            .collect();
+        assert_eq!(offered.len(), 2, "{message}");
+        for arguments in &offered {
+            let parsed = parse_arguments(arguments);
+            assert!(parsed.is_ok(), "{arguments:?}");
+            if let Ok(Command::Show { name, .. }) = parsed {
+                assert!(crate::query::parse(&name).is_ok(), "{name}");
+            }
+        }
+    }
+}
+
+mod given_a_hook_input_it_cannot_use {
+    use super::*;
+    use crate::guard::HookInputFault;
+
+    #[test]
+    fn when_unreadable_then_the_message_says_why() {
+        assert_eq!(
+            hook_input_unreadable("broken pipe"),
+            "excerpt guard: could not read the hook input: broken pipe\n"
+        );
+    }
+
+    #[test]
+    fn when_malformed_then_the_message_names_what_it_lacks() {
+        let rows = [
+            (
+                HookInputFault::NotJson("expected value at line 1 column 1".to_owned()),
+                "it is not JSON: expected value at line 1 column 1",
+            ),
+            (HookInputFault::NoToolName, "it holds no `tool_name`"),
+            (
+                HookInputFault::NoCommand,
+                "a Bash call holds no `tool_input.command`",
+            ),
+        ];
+        for (fault, detail) in rows {
+            assert_eq!(
+                hook_input_fault(&fault),
+                format!("excerpt guard: the hook input is not what Claude Code sends: {detail}\n")
+            );
+        }
+    }
+}
+
+mod given_a_usage_fault {
+    use super::*;
+
+    #[test]
+    fn when_guard_is_given_an_argument_then_the_message_says_it_takes_none() {
+        assert_eq!(
+            usage_fault(&UsageFault::GuardArgument("--strict".to_owned())),
+            "excerpt: guard takes no arguments, and `--strict` is one\nRun `excerpt --help` for the grammar.\n"
+        );
+    }
+
+    #[test]
+    fn when_the_command_is_unknown_then_every_command_is_named() {
+        assert_eq!(
+            usage_fault(&UsageFault::UnknownCommand("find".to_owned())),
+            "excerpt: `find` is not a command; the commands are outline, show, and guard\nRun `excerpt --help` for the grammar.\n"
+        );
+    }
+}

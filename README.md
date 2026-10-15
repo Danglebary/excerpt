@@ -49,12 +49,14 @@ curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/Danglebar
 
 It installs to `~/.local/bin`, or to `$EXCERPT_INSTALL_DIR`. With Nix, `nix profile install github:Danglebary/excerpt`; with cargo, `cargo install --locked --git https://github.com/Danglebary/excerpt`.
 
-The Claude Code plugin, once the binary is on `PATH`, adds a skill that teaches agents both commands:
+The Claude Code plugin, once the binary is on `PATH`, adds a skill that teaches agents both commands and a hook that holds them to it:
 
 ```
 /plugin marketplace add Danglebary/excerpt
 /plugin install excerpt@excerpt
 ```
+
+The hook runs `excerpt guard` before every Bash call. It blocks a command that prints lines of a file excerpt reads through `sed -n` line numbers, `head`, `tail`, or `cat`, and its refusal hands the agent the `outline` and `show` commands for that file. Standard input, pattern prints, output redirected to a file, and every other kind of file pass. Without the binary on `PATH` every Bash call reports a non-blocking hook error, which is the signal to install it.
 
 ## Exit status
 
@@ -64,6 +66,8 @@ The Claude Code plugin, once the binary is on `PATH`, adds a skill that teaches 
 | 1 | refused: no item answers the name, several do, one is too long to print, or a named file is in a language excerpt does not read |
 | 2 | the arguments are malformed |
 | 3 | reading a path failed; what was printed may be incomplete |
+
+`excerpt guard` speaks Claude Code's hook codes instead: 0 lets the command run, 2 blocks it, and 1 reports a hook input it cannot read without blocking the command.
 
 ## Development
 
