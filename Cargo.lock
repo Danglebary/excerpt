@@ -200,13 +200,14 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "excerpt"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "ignore",
  "mimalloc",
  "serde_json",
  "tree-sitter",
+ "tree-sitter-bash",
  "tree-sitter-rust",
  "tree-sitter-typescript",
 ]
@@ -503,6 +504,16 @@ dependencies = [
  "regex",
  "serde_json",
  "streaming-iterator",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-bash"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e5ec769279cc91b561d3df0d8a5deb26b0ad40d183127f409494d6d8fc53062"
+dependencies = [
+ "cc",
  "tree-sitter-language",
 ]
 

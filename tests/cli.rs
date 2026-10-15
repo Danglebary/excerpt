@@ -8,13 +8,14 @@ use std::fs;
 
 use excerpt::parallel::{ATTEMPT_INPUT_BYTES_MAX, WORKERS_MAX};
 use excerpt::report::{LISTED_MATCHES_MAX, OUTLINE_ITEMS_MAX};
-use support::{Scratch, run};
+use support::{Scratch, bash_call, run, run_with_input};
 
 #[cfg(test)]
 mod support {
     use std::fs;
+    use std::io::Write as _;
     use std::path::PathBuf;
-    use std::process::{Command, Output};
+    use std::process::{Command, Output, Stdio};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static NEXT_DIRECTORY: AtomicUsize = AtomicUsize::new(0);
@@ -58,6 +59,41 @@ mod support {
             String::from_utf8(output.stdout).unwrap(),
             String::from_utf8(output.stderr).unwrap(),
         )
+    }
+
+    /// Runs the binary from the scratch directory with `input` on stdin: its exit code,
+    /// stdout, and stderr.
+    pub fn run_with_input(
+        scratch: &Scratch,
+        arguments: &[&str],
+        input: &[u8],
+    ) -> (i32, String, String) {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_excerpt"))
+            .args(arguments)
+            .current_dir(&scratch.root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(input).unwrap();
+        let output = child.wait_with_output().unwrap();
+        (
+            output.status.code().unwrap(),
+            String::from_utf8(output.stdout).unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    }
+
+    /// The input Claude Code hands a `PreToolUse` hook for a Bash call running `command`.
+    pub fn bash_call(command: &str) -> Vec<u8> {
+        let input = serde_json::json!({
+            "session_id": "session",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": command, "description": "a call" },
+        });
+        serde_json::to_vec(&input).unwrap()
     }
 }
 
@@ -511,5 +547,78 @@ mod given_another_c_library {
             .unwrap();
 
         assert_eq!(String::from_utf8(output.stderr).unwrap(), "");
+    }
+}
+
+mod given_guard {
+    use super::*;
+    use excerpt::guard::HOOK_INPUT_BYTES_MAX;
+
+    #[test]
+    fn when_the_command_prints_source_lines_then_it_exits_2_with_the_refusal_on_stderr() {
+        let scratch = Scratch::new();
+
+        let (code, stdout, stderr) =
+            run_with_input(&scratch, &["guard"], &bash_call("sed -n 1,40p src/plan.rs"));
+
+        assert_eq!(code, 2);
+        assert_eq!(stdout, "");
+        assert!(
+            stderr
+                .starts_with("excerpt guard: blocked a `sed -n` line-range read of src/plan.rs.\n"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn when_the_command_reads_by_item_then_it_exits_0_printing_nothing() {
+        let scratch = Scratch::new();
+
+        let (code, stdout, stderr) = run_with_input(
+            &scratch,
+            &["guard"],
+            &bash_call("excerpt show plan src/plan.rs"),
+        );
+
+        assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "", ""));
+    }
+
+    #[test]
+    fn when_the_call_is_another_tool_s_then_it_exits_0_printing_nothing() {
+        let scratch = Scratch::new();
+        let input = br#"{"tool_name":"Read","tool_input":{"file_path":"src/plan.rs"}}"#;
+
+        let (code, stdout, stderr) = run_with_input(&scratch, &["guard"], input);
+
+        assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "", ""));
+    }
+
+    #[test]
+    fn when_the_input_is_malformed_then_it_exits_1_without_blocking() {
+        let scratch = Scratch::new();
+
+        let (code, _, stderr) = run_with_input(&scratch, &["guard"], b"sed -n 1,40p a.rs");
+
+        assert_eq!(code, 1);
+        assert!(
+            stderr.starts_with(
+                "excerpt guard: the hook input is not what Claude Code sends: it is not JSON"
+            ),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn when_the_input_is_past_the_read_bound_then_it_exits_1_without_blocking() {
+        let scratch = Scratch::new();
+        let input_bytes = usize::try_from(HOOK_INPUT_BYTES_MAX + 1).unwrap();
+
+        let (code, _, stderr) = run_with_input(&scratch, &["guard"], &vec![b' '; input_bytes]);
+
+        assert_eq!(code, 1);
+        assert!(
+            stderr.starts_with("excerpt guard: could not read the hook input"),
+            "{stderr}"
+        );
     }
 }

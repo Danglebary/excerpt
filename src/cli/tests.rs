@@ -121,3 +121,20 @@ mod given_no_subcommand {
         assert_eq!(parsed(&["-V"]), Ok(Command::Version));
     }
 }
+
+mod given_guard {
+    use super::*;
+
+    #[test]
+    fn when_parsed_alone_then_it_is_the_hook_command() {
+        assert_eq!(parsed(&["guard"]), Ok(Command::Guard));
+    }
+
+    #[test]
+    fn when_parsed_holding_an_argument_then_it_is_refused() {
+        assert_eq!(
+            parsed(&["guard", "--strict"]),
+            Err(UsageFault::GuardArgument("--strict".to_owned()))
+        );
+    }
+}

@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 use excerpt::cli::{self, Command};
 use excerpt::exit_code;
+use excerpt::guard::{self, HOOK_INPUT_BYTES_MAX, HookInput, Verdict};
 use excerpt::item::{self, Outline};
 use excerpt::language::Language;
 use excerpt::parallel::{self, ATTEMPT_INPUT_BYTES_MAX, Attempt, Pool, Work};
@@ -42,6 +43,7 @@ fn main() -> ExitCode {
         }
         Ok(Command::Outline { paths }) => run_outline(&paths),
         Ok(Command::Show { name, all, paths }) => run_show(&name, all, &paths),
+        Ok(Command::Guard) => run_guard(),
         Err(fault) => emit("", &report::usage_fault(&fault), exit_code::USAGE),
     };
     ExitCode::from(code)
@@ -65,6 +67,13 @@ enum Contents {
     NotText,
     /// The file holds more bytes than the read allowed, having grown since its size was
     /// read.
+    Longer,
+}
+
+/// What a read bounded to some bytes gave: every byte the source held, or that it held
+/// more.
+enum Bounded {
+    Bytes(Vec<u8>),
     Longer,
 }
 
@@ -173,20 +182,58 @@ fn open_source(path: &str) -> io::Result<Opened> {
 
 /// Reads up to `bytes_max` bytes of an opened file, telling a file that holds more apart.
 fn read_contents(file: &fs::File, bytes_max: u64) -> io::Result<Contents> {
+    let Bounded::Bytes(buffer) = read_bounded(file, bytes_max)? else {
+        return Ok(Contents::Longer);
+    };
+    match String::from_utf8(buffer) {
+        Ok(text) => Ok(Contents::Text(text)),
+        Err(_) => Ok(Contents::NotText),
+    }
+}
+
+/// Reads up to `bytes_max` bytes, telling a source that holds more apart.
+fn read_bounded(source: impl Read, bytes_max: u64) -> io::Result<Bounded> {
     let Some(read_max) = bytes_max.checked_add(1) else {
         unreachable!("a byte bound is below u64::MAX");
     };
     let mut buffer = Vec::new();
-    file.take(read_max).read_to_end(&mut buffer)?;
+    source.take(read_max).read_to_end(&mut buffer)?;
     let Ok(read_bytes) = u64::try_from(buffer.len()) else {
         unreachable!("a buffer's length fits a u64");
     };
     if read_bytes > bytes_max {
-        return Ok(Contents::Longer);
+        return Ok(Bounded::Longer);
     }
-    match String::from_utf8(buffer) {
-        Ok(text) => Ok(Contents::Text(text)),
-        Err(_) => Ok(Contents::NotText),
+    assert!(
+        read_bytes <= bytes_max,
+        "a bounded read holds no more than its bound"
+    );
+    Ok(Bounded::Bytes(buffer))
+}
+
+/// The Claude Code hook: judges the Bash call on stdin and exits with the code the hook
+/// contract gives the verdict. An input it cannot use is reported without blocking, so a
+/// change in what Claude Code sends never stops every Bash call.
+fn run_guard() -> u8 {
+    let input = match read_bounded(io::stdin().lock(), HOOK_INPUT_BYTES_MAX) {
+        Ok(Bounded::Bytes(input)) => input,
+        Ok(Bounded::Longer) => {
+            let message = report::hook_input_unreadable("it is longer than excerpt guard reads");
+            return emit("", &message, exit_code::HOOK_ERROR);
+        }
+        Err(error) => {
+            let message = report::hook_input_unreadable(&error.to_string());
+            return emit("", &message, exit_code::HOOK_ERROR);
+        }
+    };
+    let command = match guard::hook_input(&input) {
+        Ok(HookInput::Bash(command)) => command,
+        Ok(HookInput::OtherTool) => return exit_code::SUCCESS,
+        Err(fault) => return emit("", &report::hook_input_fault(&fault), exit_code::HOOK_ERROR),
+    };
+    match guard::verdict(&command) {
+        Verdict::Allow => exit_code::SUCCESS,
+        Verdict::Deny(denial) => emit("", &report::guard_denial(&denial), exit_code::HOOK_BLOCK),
     }
 }
 

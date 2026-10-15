@@ -4,6 +4,7 @@
 use std::ops::ControlFlow;
 
 use crate::cli::UsageFault;
+use crate::guard::{Denial, HookInputFault, Reader};
 use crate::item::{Item, Outline};
 use crate::language::{EXTENSIONS, Language};
 use crate::query::QueryFault;
@@ -35,6 +36,11 @@ Usage:
       Print the item NAME names, whole, its doc comments and attributes included, each
       line numbered. Refused when no item answers NAME, or when several do and --all is
       absent; the refusal lists them. --all prints every match, up to 20.
+  excerpt guard
+      The Claude Code hook the plugin runs before each Bash call. Reads the hook's input
+      on stdin and blocks a command that prints lines of a file excerpt reads through
+      `sed -n` line numbers, `head`, `tail`, or `cat`, offering outline and show in its
+      place.
 
 NAME is an item's name, optionally qualified by the items it sits in and led by its
 kind, exactly as an outline prints it after the line numbers:
@@ -52,6 +58,8 @@ Exit status:
      is in a language excerpt does not read
   2  the arguments are malformed
   3  reading a path failed; what was printed may be incomplete
+guard speaks Claude Code's hook codes instead: 0 lets the command run, 2 blocks it,
+and 1 reports a hook input it cannot read without blocking the command.
 ";
 
 /// One item's line in an outline or a refusal: `src/plan.rs:104-180 fn plan`.
@@ -362,12 +370,15 @@ pub fn skipped(path: &str, entry: &Entry<'_>) -> String {
 #[must_use]
 pub fn usage_fault(fault: &UsageFault) -> String {
     let problem = match fault {
-        UsageFault::MissingCommand => "name a command, outline or show".to_owned(),
+        UsageFault::MissingCommand => "name a command: outline, show, or guard".to_owned(),
         UsageFault::UnknownCommand(word) => {
-            format!("`{word}` is not a command; the commands are outline and show")
+            format!("`{word}` is not a command; the commands are outline, show, and guard")
         }
         UsageFault::UnknownFlag(flag) => format!("`{flag}` is not a flag excerpt takes"),
         UsageFault::MissingName => "show needs the name of the item to print".to_owned(),
+        UsageFault::GuardArgument(word) => {
+            format!("guard takes no arguments, and `{word}` is one")
+        }
     };
     format!("excerpt: {problem}\nRun `excerpt --help` for the grammar.\n")
 }
@@ -411,6 +422,45 @@ pub enum Entry<'outline> {
 pub struct File<'file> {
     pub path: &'file str,
     pub entry: Entry<'file>,
+}
+
+/// What the agent reads when the hook blocks its command: the read that was blocked, and
+/// the item commands that read the same file, spelled with its path as the command wrote
+/// it.
+#[must_use]
+pub fn guard_denial(denial: &Denial) -> String {
+    let read = match denial.reader {
+        Reader::SedRange => "a `sed -n` line-range read",
+        Reader::Head => "a `head` read",
+        Reader::Tail => "a `tail` read",
+        Reader::Cat => "a `cat` read",
+    };
+    let path = &denial.path;
+    format!(
+        "excerpt guard: blocked {read} of {path}.\n\
+         Read code by item instead:\n\
+         \x20 excerpt outline {path}\n\
+         \x20 excerpt show NAME {path}\n\
+         `outline` lists every item in the file with the lines it spans; `show` prints the \
+         one NAME names, whole, NAME written as the outline prints it. A line no item \
+         holds, such as an import or the line a compiler error names, is read with the Read \
+         tool's offset and limit.\n"
+    )
+}
+
+#[must_use]
+pub fn hook_input_unreadable(detail: &str) -> String {
+    format!("excerpt guard: could not read the hook input: {detail}\n")
+}
+
+#[must_use]
+pub fn hook_input_fault(fault: &HookInputFault) -> String {
+    let detail = match fault {
+        HookInputFault::NotJson(message) => format!("it is not JSON: {message}"),
+        HookInputFault::NoToolName => "it holds no `tool_name`".to_owned(),
+        HookInputFault::NoCommand => "a Bash call holds no `tool_input.command`".to_owned(),
+    };
+    format!("excerpt guard: the hook input is not what Claude Code sends: {detail}\n")
 }
 
 #[cfg(test)]

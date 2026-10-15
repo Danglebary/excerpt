@@ -16,6 +16,7 @@ pub enum Command {
     },
     Help,
     Version,
+    Guard,
 }
 
 /// Every way the arguments break the grammar.
@@ -25,6 +26,7 @@ pub enum UsageFault {
     UnknownCommand(String),
     UnknownFlag(String),
     MissingName,
+    GuardArgument(String),
 }
 
 /// Parses the arguments after the program name.
@@ -40,6 +42,8 @@ pub fn parse_arguments(arguments: &[String]) -> Result<Command, UsageFault> {
         ["--version" | "-V"] => Ok(Command::Version),
         ["outline", rest @ ..] => parse_outline(rest),
         ["show", rest @ ..] => parse_show(rest),
+        ["guard"] => Ok(Command::Guard),
+        ["guard", first, ..] => Err(UsageFault::GuardArgument((*first).to_owned())),
         [first, ..] => Err(UsageFault::UnknownCommand((*first).to_owned())),
     }
 }
