@@ -5,11 +5,12 @@
 //! simple command in it is judged wherever it stands: in a list, a pipeline, a loop, a
 //! condition, or a command substitution, an unquoted heredoc's included. Quoted text, a
 //! comment, and a quoted heredoc's body are text to that grammar, so a message or a script
-//! that only mentions a reader passes. A command is denied when it is `sed -n` printing by
-//! line number, `head`, `tail` other than following a file, or `cat`; it reads a file in a
-//! language excerpt reads, named as an argument or redirected into it; and its standard
-//! output is not redirected to a file. Standard input, a pattern print, a file named
-//! through a variable, and every other file pass.
+//! that only mentions a reader passes. A command is denied when it is `sed -n` printing a
+//! line range, bounded by line numbers or by a pattern at either end, `awk` printing lines
+//! by their numbers, `head`, `tail` other than following a file, or `cat`; it reads a file
+//! in a language excerpt reads, named as an argument or redirected into it; and its
+//! standard output is not redirected to a file. Standard input, a print of the lines one
+//! pattern matches, a file named through a variable, and every other file pass.
 
 use std::path::Path;
 
@@ -40,6 +41,7 @@ pub struct Denial {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reader {
     SedRange,
+    AwkRange,
     Head,
     Tail,
     Cat,
@@ -206,6 +208,7 @@ fn judge(command: Node<'_>, source: &str, node_count: usize) -> Option<Denial> {
     }
     let (reader, read) = match program {
         "sed" | "gsed" => (Reader::SedRange, sed_line_range_read(arguments)?),
+        "awk" | "gawk" | "mawk" | "nawk" => (Reader::AwkRange, awk_line_range_read(arguments)?),
         "head" => (Reader::Head, operands(arguments)),
         "tail" if follows(arguments) => return None,
         "tail" => (Reader::Tail, operands(arguments)),
@@ -468,8 +471,8 @@ struct SedCall<'w, 't> {
     files: Vec<&'w Word<'t>>,
 }
 
-/// The files a `sed` command prints by line number from; none when it is not quiet, edits
-/// in place, or runs any script that is not line-number prints.
+/// The files a `sed` command prints line ranges from; none when it is not quiet, edits in
+/// place, or runs any script that is not line-range prints.
 fn sed_line_range_read<'w, 't>(arguments: &'w [Word<'t>]) -> Option<Vec<&'w Word<'t>>> {
     let call = sed_call(arguments)?;
     if !call.is_quiet {
@@ -479,7 +482,7 @@ fn sed_line_range_read<'w, 't>(arguments: &'w [Word<'t>]) -> Option<Vec<&'w Word
     if scripts.is_empty() {
         return None;
     }
-    if scripts.iter().all(|script| prints_by_line_number(script)) {
+    if scripts.iter().all(|script| prints_line_ranges(script)) {
         Some(call.files)
     } else {
         None
@@ -612,9 +615,9 @@ fn long_sed_flag(long: &str) -> Option<SedFlag<'_>> {
     })
 }
 
-/// Whether a `sed` script is nothing but prints by line number, `10,40p` or `12p` or
-/// `1,40p;40q`, with at least one print among them.
-fn prints_by_line_number(script: &str) -> bool {
+/// Whether a `sed` script is nothing but prints of line ranges, `10,40p` or `12p` or
+/// `/fn plan/,/^}/p` or `1,40p;40q`, with at least one print among them.
+fn prints_line_ranges(script: &str) -> bool {
     let mut has_print = false;
     for command in script.split([';', '\n']).map(str::trim) {
         if command.is_empty() {
@@ -636,20 +639,263 @@ fn prints_by_line_number(script: &str) -> bool {
     has_print
 }
 
-/// `12`, `10,40`, `100,$`, or `5,+10`.
+/// One address of a `sed` range: a line number or `$`, or a pattern between slashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SedAddress {
+    Line,
+    Pattern,
+}
+
+/// `12`, `10,40`, `100,$`, `5,+10`, or a range a pattern bounds at either end,
+/// `/fn plan/,/^}/` or `/let x/,+2` or `10,/^}/`. A lone pattern selects the lines that
+/// match it, as `grep` does, and is no range.
 fn is_line_range(address: &str) -> bool {
-    match address.split_once(',') {
-        Some((first, last)) => {
-            is_line_number(first)
-                && (is_line_number(last) || last.strip_prefix('+').is_some_and(is_digits))
+    let Some((first, rest)) = sed_address(address) else {
+        return false;
+    };
+    let Some(last) = rest.strip_prefix(',') else {
+        if rest.is_empty() {
+            return first == SedAddress::Line;
         }
-        None => is_line_number(address),
+        return false;
+    };
+    if last.strip_prefix('+').is_some_and(is_digits) {
+        return true;
     }
+    sed_address(last).is_some_and(|(_, after)| after.is_empty())
+}
+
+/// The address `text` opens with and the text after it; none when it opens with no
+/// address or a pattern left open.
+fn sed_address(text: &str) -> Option<(SedAddress, &str)> {
+    if let Some(pattern) = text.strip_prefix('/') {
+        let end = pattern_end(pattern)?;
+        let rest = pattern.get(end..)?;
+        assert!(
+            rest.len() < pattern.len(),
+            "a pattern's closing slash is consumed with it"
+        );
+        return Some((SedAddress::Pattern, rest));
+    }
+    if let Some(rest) = text.strip_prefix('$') {
+        return Some((SedAddress::Line, rest));
+    }
+    let digits_end = text
+        .find(|character: char| !character.is_ascii_digit())
+        .unwrap_or(text.len());
+    let (number, rest) = text.split_at_checked(digits_end)?;
+    if !is_digits(number) {
+        return None;
+    }
+    assert!(
+        rest.len() < text.len(),
+        "a line number is at least one digit"
+    );
+    Some((SedAddress::Line, rest))
+}
+
+/// The byte just past the slash that closes a pattern, read from after its opening slash;
+/// none when no unescaped slash closes it.
+fn pattern_end(pattern: &str) -> Option<usize> {
+    let mut is_escaped = false;
+    for (index, character) in pattern.char_indices() {
+        if is_escaped {
+            is_escaped = false;
+        } else if character == '\\' {
+            is_escaped = true;
+        } else if character == '/' {
+            let Some(end) = index.checked_add(1) else {
+                unreachable!("an index inside a word plus one byte fits a usize");
+            };
+            return Some(end);
+        }
+    }
+    None
 }
 
 /// A line number or `$`, the last line.
 fn is_line_number(address: &str) -> bool {
     address == "$" || is_digits(address)
+}
+
+/// The comparisons an `awk` condition may hold, each two-character operator before the
+/// one-character operator it begins with.
+const AWK_COMPARISONS: [&str; 6] = ["==", "!=", "<=", ">=", "<", ">"];
+
+/// The files an `awk` command prints lines of by their numbers, `NR>=10 && NR<=40` or
+/// `NR==5 {print; exit}`; none when its program comes from a file, is decided at run time,
+/// or does anything else.
+fn awk_line_range_read<'w, 't>(arguments: &'w [Word<'t>]) -> Option<Vec<&'w Word<'t>>> {
+    let mut program = None;
+    let mut files = Vec::new();
+    let mut expects_value = false;
+    let mut options_ended = false;
+    for word in arguments {
+        if program.is_some() {
+            let is_assignment_operand = word.value.as_deref().is_some_and(is_assignment);
+            if !is_assignment_operand {
+                files.push(word);
+            }
+            continue;
+        }
+        let value = word.value.as_deref()?;
+        if expects_value {
+            expects_value = false;
+        } else if options_ended || !is_option(value) {
+            program = Some(value);
+        } else if value == "--" {
+            options_ended = true;
+        } else {
+            expects_value = awk_flag_takes_next_word(value)?;
+        }
+    }
+    let program = program?;
+    if is_line_number_program(program) {
+        Some(files)
+    } else {
+        None
+    }
+}
+
+/// Whether an `awk` flag takes the next word as its value; none for a flag the verdict
+/// does not read, a program file's among them.
+fn awk_flag_takes_next_word(flag: &str) -> Option<bool> {
+    assert!(is_option(flag), "only a flag is read as one");
+    match flag {
+        "-F" | "-v" | "--field-separator" | "--assign" => Some(true),
+        _ if flag.starts_with("--field-separator=") || flag.starts_with("--assign=") => Some(false),
+        _ if flag.starts_with("--") => None,
+        _ if flag.starts_with("-F") || flag.starts_with("-v") => Some(false),
+        _ => None,
+    }
+}
+
+/// Whether an `awk` program is one rule selecting lines by number alone and printing each
+/// line it selects: `NR>=10 && NR<=40`, `NR==5 {print; exit}`, or `NR<=9 {print NR": "$0}`.
+fn is_line_number_program(program: &str) -> bool {
+    let (condition, action) = match program.split_once('{') {
+        Some((condition, rest)) => {
+            let Some(body) = rest.trim_end().strip_suffix('}') else {
+                return false;
+            };
+            (condition, Some(body))
+        }
+        None => (program, None),
+    };
+    let condition = condition.trim();
+    if condition.is_empty() {
+        return false;
+    }
+    let is_by_line_number = condition
+        .split("&&")
+        .flat_map(|part| part.split("||"))
+        .all(is_line_number_comparison);
+    if !is_by_line_number {
+        return false;
+    }
+    action.is_none_or(prints_each_line)
+}
+
+/// `NR>=10`, `FNR==5`, or `40>=NR`: a record number against a number.
+fn is_line_number_comparison(term: &str) -> bool {
+    let Some((left, right)) = awk_comparison(term) else {
+        return false;
+    };
+    match (is_record_number(left), is_record_number(right)) {
+        (true, false) => is_digits(right),
+        (false, true) => is_digits(left),
+        (true, true) | (false, false) => false,
+    }
+}
+
+/// The two sides of a comparison, trimmed; none when the term holds no comparison.
+fn awk_comparison(term: &str) -> Option<(&str, &str)> {
+    let position = term.find(['<', '>', '=', '!'])?;
+    let (left, from_operator) = term.split_at_checked(position)?;
+    let operator = AWK_COMPARISONS
+        .iter()
+        .find(|operator| from_operator.starts_with(**operator))?;
+    let right = from_operator.strip_prefix(*operator)?;
+    Some((left.trim(), right.trim()))
+}
+
+fn is_record_number(text: &str) -> bool {
+    matches!(text, "NR" | "FNR")
+}
+
+/// Whether an `awk` action prints each line it runs on and does nothing else but stop:
+/// `print`, `print $0`, or `print NR": "$0`, and `exit`.
+fn prints_each_line(body: &str) -> bool {
+    let mut has_print = false;
+    for statement in body.split([';', '\n']).map(str::trim) {
+        if statement.is_empty() || statement == "exit" {
+            continue;
+        }
+        let Some(arguments) = statement.strip_prefix("print") else {
+            return false;
+        };
+        if !prints_the_line(arguments) {
+            return false;
+        }
+        has_print = true;
+    }
+    has_print
+}
+
+/// Whether a print's arguments print the line: none, which prints `$0`, or `$0` among
+/// record numbers and string literals.
+fn prints_the_line(arguments: &str) -> bool {
+    if arguments.trim().is_empty() {
+        return true;
+    }
+    let Some(terms) = awk_print_terms(arguments) else {
+        return false;
+    };
+    let is_line_or_number = terms
+        .iter()
+        .all(|term| term == "$0" || is_record_number(term));
+    if !is_line_or_number {
+        return false;
+    }
+    terms.iter().any(|term| term == "$0")
+}
+
+/// The terms of an `awk` print list outside its string literals, split at whitespace, at
+/// commas, and at each literal; none when a literal is left open.
+fn awk_print_terms(arguments: &str) -> Option<Vec<String>> {
+    let mut terms = Vec::new();
+    let mut term = String::new();
+    let mut is_in_string = false;
+    let mut is_escaped = false;
+    for character in arguments.chars() {
+        if is_in_string {
+            if is_escaped {
+                is_escaped = false;
+            } else if character == '\\' {
+                is_escaped = true;
+            } else if character == '"' {
+                is_in_string = false;
+            }
+        } else if character == '"' || character == ',' || character.is_whitespace() {
+            is_in_string = character == '"';
+            if !term.is_empty() {
+                terms.push(std::mem::take(&mut term));
+            }
+        } else {
+            term.push(character);
+        }
+    }
+    if is_in_string {
+        return None;
+    }
+    if !term.is_empty() {
+        terms.push(term);
+    }
+    assert!(
+        terms.iter().all(|term| !term.contains('"')),
+        "a term holds no part of a string literal"
+    );
+    Some(terms)
 }
 
 fn is_digits(text: &str) -> bool {

@@ -431,6 +431,7 @@ pub struct File<'file> {
 pub fn guard_denial(denial: &Denial) -> String {
     let read = match denial.reader {
         Reader::SedRange => "a `sed -n` line-range read",
+        Reader::AwkRange => "an `awk` line-number read",
         Reader::Head => "a `head` read",
         Reader::Tail => "a `tail` read",
         Reader::Cat => "a `cat` read",

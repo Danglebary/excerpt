@@ -84,6 +84,37 @@ mod given_a_sed_line_range_read {
     }
 
     #[test]
+    fn when_judged_printing_a_range_a_pattern_bounds_then_it_is_denied() {
+        assert_rows(&[
+            (
+                "sed -n '/fn plan/,/^}/p' a.rs",
+                denied(Reader::SedRange, "a.rs"),
+            ),
+            (
+                "sed -n '/^struct Escalated/,/^}/p' src/main.rs",
+                denied(Reader::SedRange, "src/main.rs"),
+            ),
+            (
+                "sed -n '/match envelope.stream_kind {/,/^        }$/p' a.rs",
+                denied(Reader::SedRange, "a.rs"),
+            ),
+            (
+                "sed -n '/let celled/,+2p' a.rs",
+                denied(Reader::SedRange, "a.rs"),
+            ),
+            (
+                "sed -n '/fn plan/,$p' a.ts",
+                denied(Reader::SedRange, "a.ts"),
+            ),
+            ("sed -n '10,/^}/p' a.rs", denied(Reader::SedRange, "a.rs")),
+            (
+                "sed -n '/a,b/,/c\\/d/p' a.rs",
+                denied(Reader::SedRange, "a.rs"),
+            ),
+        ]);
+    }
+
+    #[test]
     fn when_judged_reading_a_source_file_through_a_redirect_then_it_is_denied() {
         assert_rows(&[("sed -n 1,5p < a.rs", denied(Reader::SedRange, "a.rs"))]);
     }
@@ -101,9 +132,12 @@ mod given_a_sed_line_range_read {
     }
 
     #[test]
-    fn when_judged_printing_other_than_by_line_number_then_it_is_allowed() {
+    fn when_judged_printing_other_than_a_line_range_then_it_is_allowed() {
         assert_allowed(&[
-            "sed -n '/fn plan/,/^}/p' a.rs",
+            "sed -n '/^use /p' a.rs",
+            "sed -n '/fn plan/p' a.rs",
+            "sed -n '/unterminated,5p' a.rs",
+            "sed -n '/fn plan/,p' a.rs",
             "sed -n p a.rs",
             "sed 's/a/b/' a.rs",
             "sed '1,5p' a.rs",
@@ -122,6 +156,83 @@ mod given_a_sed_line_range_read {
             "sed -n 1,40p a.rs 1> slice.rs",
             "sed -n 1,40p a.rs &> slice.rs",
         ]);
+    }
+}
+
+mod given_an_awk_line_number_read {
+    use super::*;
+
+    #[test]
+    fn when_judged_naming_a_source_file_then_it_is_denied_naming_the_file() {
+        assert_rows(&[
+            (
+                "awk 'NR>=1730 && NR<=1742' src/sqlite/tests.rs",
+                denied(Reader::AwkRange, "src/sqlite/tests.rs"),
+            ),
+            ("awk 'NR==323' a.rs", denied(Reader::AwkRange, "a.rs")),
+            ("awk 'FNR<=40' a.ts", denied(Reader::AwkRange, "a.ts")),
+            ("awk 'NR>1' a.rs", denied(Reader::AwkRange, "a.rs")),
+            (
+                "awk 'NR < 5 || NR > 90' a.rs",
+                denied(Reader::AwkRange, "a.rs"),
+            ),
+            ("awk '40>=NR' a.rs", denied(Reader::AwkRange, "a.rs")),
+            (
+                "awk 'NR>=10 && NR<=16 {print NR\": \"$0}' a.rs",
+                denied(Reader::AwkRange, "a.rs"),
+            ),
+            (
+                "awk 'NR==5 { print; exit }' a.rs",
+                denied(Reader::AwkRange, "a.rs"),
+            ),
+            (
+                "awk 'NR<=9 {print $0}' a.rs",
+                denied(Reader::AwkRange, "a.rs"),
+            ),
+            ("gawk 'NR<=20' a.rs", denied(Reader::AwkRange, "a.rs")),
+            ("awk -F: 'NR<=20' a.rs", denied(Reader::AwkRange, "a.rs")),
+            (
+                "awk -v total=0 'NR<=20' n=1 a.rs",
+                denied(Reader::AwkRange, "a.rs"),
+            ),
+            ("awk -- 'NR<=20' a.rs", denied(Reader::AwkRange, "a.rs")),
+        ]);
+    }
+
+    #[test]
+    fn when_judged_reading_a_source_file_through_a_redirect_then_it_is_denied() {
+        assert_rows(&[("awk 'NR<=20' < a.rs", denied(Reader::AwkRange, "a.rs"))]);
+    }
+
+    #[test]
+    fn when_judged_reading_no_source_file_then_it_is_allowed() {
+        assert_allowed(&[
+            "cargo test 2>&1 | awk 'NR<=20'",
+            "awk 'NR<=20' Cargo.toml",
+            "awk 'NR<=20' \"$F\"",
+            "awk 'NR<=20'",
+        ]);
+    }
+
+    #[test]
+    fn when_judged_selecting_other_than_by_line_number_then_it_is_allowed() {
+        assert_allowed(&[
+            "awk '/fn plan/' a.rs",
+            "awk '{print $1}' a.rs",
+            "awk 'NR<=n' a.rs",
+            "awk 'NR>=10 {sum += $1} END {print sum}' a.rs",
+            "awk 'NR<=20 {print $2}' a.rs",
+            "awk 'NR<=20 {print NR}' a.rs",
+            "awk 'NR<=20 {}' a.rs",
+            "awk '{sub(/pub /, \"pub(crate) \"); print}' a.rs",
+            "awk -f lines.awk a.rs",
+            "awk \"$program\" a.rs",
+        ]);
+    }
+
+    #[test]
+    fn when_judged_writing_its_output_to_a_file_then_it_is_allowed() {
+        assert_allowed(&["awk 'NR<63' a.rs > head.rs", "awk 'NR<=20' a.rs >> part.rs"]);
     }
 }
 
