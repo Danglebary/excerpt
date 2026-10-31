@@ -1,5 +1,8 @@
-//! The hook's verdict on a Bash command: whether it prints lines of a file excerpt reads
-//! through a reader agents reach for in place of `outline` and `show`.
+//! The hook's verdicts on a Bash command and on a Read.
+//!
+//! On a Bash command, the verdict is whether it prints lines of a file excerpt reads
+//! through a reader agents reach for in place of `outline` and `show`; on a Read, whether
+//! a subagent takes a long code file whole.
 //!
 //! Pure and deliberately narrow. The command is parsed with bash's own grammar, and every
 //! simple command in it is judged wherever it stands: in a list, a pipeline, a loop, a
@@ -11,6 +14,10 @@
 //! in a language excerpt reads, named as an argument or redirected into it; and its
 //! standard output is not redirected to a file. Standard input, a print of the lines one
 //! pattern matches, a file named through a variable, and every other file pass.
+//!
+//! A Read is denied when a subagent makes it, it names no `offset` or `limit`, its file is
+//! in a language excerpt reads, and the file runs past `SUBAGENT_READ_LINES_MAX` lines.
+//! The shell counts the lines; every other Read passes without its file being opened.
 
 use std::path::Path;
 
@@ -21,6 +28,10 @@ use crate::language::Language;
 /// The most bytes of hook input the shell reads. A Bash command carrying a heredoc that
 /// creates a large file fits under it; an input past it is a non-blocking error.
 pub const HOOK_INPUT_BYTES_MAX: u64 = 4_194_304;
+
+/// The most lines of a code file a subagent's Read takes whole, naming no `offset` or
+/// `limit`; a longer file is read by item.
+pub const SUBAGENT_READ_LINES_MAX: usize = 300;
 
 /// Whether the hook lets a command run.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +53,7 @@ pub struct Denial {
 pub enum Reader {
     SedRange,
     AwkRange,
+    WholeFileRead,
     Head,
     Tail,
     Cat,
@@ -51,7 +63,37 @@ pub enum Reader {
 #[derive(Debug, PartialEq, Eq)]
 pub enum HookInput {
     Bash(String),
+    Read(ReadCall),
     OtherTool,
+}
+
+/// A Read call as the hook judges it: the file it names, how much of it, and who makes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadCall {
+    pub path: String,
+    pub span: ReadSpan,
+    pub caller: Caller,
+}
+
+/// How much of a file a Read takes: all of it, or the lines an `offset` or a `limit` names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadSpan {
+    Whole,
+    Ranged,
+}
+
+/// Which agent loop makes a tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Caller {
+    MainThread,
+    Subagent,
+}
+
+/// Whether a Read is let through as it stands, or waits on its file's line count.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadScreen {
+    Allowed,
+    LineCountDecides,
 }
 
 /// Every way a hook input fails to be what Claude Code sends.
@@ -60,6 +102,7 @@ pub enum HookInputFault {
     NotJson(String),
     NoToolName,
     NoCommand,
+    NoFilePath,
 }
 
 /// Words that run the command after them, so the program is read past them.
@@ -74,29 +117,72 @@ const OUTPUT_OPERATORS: [&str; 5] = [">", ">>", ">|", "&>", "&>>"];
 /// The descriptor of standard output, written before a redirect.
 const STANDARD_OUTPUT: &str = "1";
 
-/// Reads the tool and its command from a `PreToolUse` hook's stdin, whose shape is
-/// `{"tool_name": "Bash", "tool_input": {"command": "..."}, ...}`.
-/// <https://code.claude.com/docs/en/hooks> — checked 2026-10-15
+/// Reads the tool and what the verdict judges of it from a `PreToolUse` hook's stdin.
+///
+/// The input's shape is `{"tool_name": "Bash", "tool_input": {"command": "..."}, ...}`
+/// for a Bash call and `{"tool_name": "Read", "tool_input": {"file_path": "...",
+/// "offset": 10, "limit": 50}, ...}` for a Read, `offset` and `limit` optional. Inside a
+/// subagent the input carries `agent_id`; the main thread's carries none, and carries
+/// `agent_type` under `--agent`.
+/// <https://code.claude.com/docs/en/hooks> — checked 2026-10-30
 ///
 /// # Errors
 ///
-/// Returns the fault when the input is not JSON or lacks the fields a Bash call carries.
+/// Returns the fault when the input is not JSON or lacks the fields a Bash or Read call
+/// carries.
 pub fn hook_input(input: &[u8]) -> Result<HookInput, HookInputFault> {
     let value: serde_json::Value = serde_json::from_slice(input)
         .map_err(|error| HookInputFault::NotJson(error.to_string()))?;
     let Some(tool) = value.get("tool_name").and_then(serde_json::Value::as_str) else {
         return Err(HookInputFault::NoToolName);
     };
-    if tool != "Bash" {
-        return Ok(HookInput::OtherTool);
+    match tool {
+        "Bash" => bash_command(&value).map(HookInput::Bash),
+        "Read" => read_call(&value).map(HookInput::Read),
+        _ => Ok(HookInput::OtherTool),
     }
+}
+
+/// The command a Bash call's input carries.
+fn bash_command(value: &serde_json::Value) -> Result<String, HookInputFault> {
     let command = value
         .get("tool_input")
         .and_then(|tool_input| tool_input.get("command"));
     match command.and_then(serde_json::Value::as_str) {
-        Some(command) => Ok(HookInput::Bash(command.to_owned())),
+        Some(command) => Ok(command.to_owned()),
         None => Err(HookInputFault::NoCommand),
     }
+}
+
+/// The file a Read call's input names, how much of it, and whether a subagent makes it.
+/// A null `offset` or `limit` names none.
+fn read_call(value: &serde_json::Value) -> Result<ReadCall, HookInputFault> {
+    let tool_input = value.get("tool_input");
+    let path = tool_input
+        .and_then(|tool_input| tool_input.get("file_path"))
+        .and_then(serde_json::Value::as_str);
+    let Some(path) = path else {
+        return Err(HookInputFault::NoFilePath);
+    };
+    let names = |field: &str| {
+        tool_input
+            .and_then(|tool_input| tool_input.get(field))
+            .is_some_and(|named| !named.is_null())
+    };
+    let span = if names("offset") || names("limit") {
+        ReadSpan::Ranged
+    } else {
+        ReadSpan::Whole
+    };
+    let caller = match value.get("agent_id").and_then(serde_json::Value::as_str) {
+        Some(_) => Caller::Subagent,
+        None => Caller::MainThread,
+    };
+    Ok(ReadCall {
+        path: path.to_owned(),
+        span,
+        caller,
+    })
 }
 
 /// Judges one Bash command as the hook receives it: the first reader in it that prints a
@@ -896,6 +982,85 @@ fn awk_print_terms(arguments: &str) -> Option<Vec<String>> {
         "a term holds no part of a string literal"
     );
     Some(terms)
+}
+
+/// The characters a shell word holds bare, beside letters and digits: none of them is
+/// special to the shell.
+const BARE_WORD_PUNCTUATION: &str = "/._-+:@%,=";
+
+/// Whether a Read is let through as it stands or waits on its file's line count: a
+/// subagent's Read of a code file naming no `offset` or `limit` waits, and every other
+/// Read is let through.
+#[must_use]
+pub fn read_screen(call: &ReadCall) -> ReadScreen {
+    match (call.caller, call.span) {
+        (Caller::Subagent, ReadSpan::Whole) => {}
+        (Caller::Subagent, ReadSpan::Ranged) | (Caller::MainThread, _) => {
+            return ReadScreen::Allowed;
+        }
+    }
+    match Language::of_path(Path::new(&call.path)) {
+        Some(_) => ReadScreen::LineCountDecides,
+        None => ReadScreen::Allowed,
+    }
+}
+
+/// Judges a Read its line count decides, its file holding `line_count` lines: denied past
+/// `SUBAGENT_READ_LINES_MAX`, naming the file as one shell word so the refusal's commands
+/// run as written.
+///
+/// # Panics
+///
+/// When the call is one `read_screen` lets through, which no line count decides.
+#[must_use]
+pub fn read_verdict(call: &ReadCall, line_count: usize) -> Verdict {
+    assert_eq!(
+        read_screen(call),
+        ReadScreen::LineCountDecides,
+        "only a Read its line count decides is judged by it"
+    );
+    if line_count > SUBAGENT_READ_LINES_MAX {
+        Verdict::Deny(Denial {
+            reader: Reader::WholeFileRead,
+            path: shell_word(&call.path),
+        })
+    } else {
+        Verdict::Allow
+    }
+}
+
+/// `path` as one shell word: bare where every character is plain, else single-quoted, a
+/// single quote inside it written as `'\''`.
+fn shell_word(path: &str) -> String {
+    let is_plain = |character: char| {
+        character.is_ascii_alphanumeric() || BARE_WORD_PUNCTUATION.contains(character)
+    };
+    if path.chars().all(is_plain) {
+        if !path.is_empty() {
+            return path.to_owned();
+        }
+    }
+    let quoted = format!("'{}'", path.replace('\'', "'\\''"));
+    assert!(quoted.len() > path.len(), "quoting adds the quotes");
+    quoted
+}
+
+/// The lines `bytes` hold: one per newline, and one more for a last line no newline ends.
+#[must_use]
+pub fn line_count(bytes: &[u8]) -> usize {
+    let segments = bytes.split(|byte| *byte == b'\n').count();
+    let Some(newlines) = segments.checked_sub(1) else {
+        unreachable!("splitting a slice yields at least one segment");
+    };
+    match bytes.last() {
+        Some(last) if *last != b'\n' => {
+            let Some(lines) = newlines.checked_add(1) else {
+                unreachable!("a count of a buffer's bytes plus one fits a usize");
+            };
+            lines
+        }
+        Some(_) | None => newlines,
+    }
 }
 
 fn is_digits(text: &str) -> bool {

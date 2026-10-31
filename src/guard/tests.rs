@@ -14,6 +14,15 @@ fn denied(reader: Reader, path: &str) -> Verdict {
     })
 }
 
+/// A Read call naming `path`, over `span`, made by `caller`.
+fn read_call(path: &str, span: ReadSpan, caller: Caller) -> ReadCall {
+    ReadCall {
+        path: path.to_owned(),
+        span,
+        caller,
+    }
+}
+
 /// Holds each command to its verdict, naming the command that broke.
 fn assert_rows(rows: &[(&str, Verdict)]) {
     for (command, expected) in rows {
@@ -390,6 +399,93 @@ mod given_other_programs {
     }
 }
 
+mod given_a_read_call {
+    use super::*;
+
+    #[test]
+    fn when_screened_then_only_a_subagents_whole_read_of_a_code_file_waits_on_its_line_count() {
+        let rows = [
+            (
+                read_call("/p/a.rs", ReadSpan::Whole, Caller::Subagent),
+                ReadScreen::LineCountDecides,
+            ),
+            (
+                read_call("/p/a.tsx", ReadSpan::Whole, Caller::Subagent),
+                ReadScreen::LineCountDecides,
+            ),
+            (
+                read_call("/p/a.rs", ReadSpan::Whole, Caller::MainThread),
+                ReadScreen::Allowed,
+            ),
+            (
+                read_call("/p/a.rs", ReadSpan::Ranged, Caller::Subagent),
+                ReadScreen::Allowed,
+            ),
+            (
+                read_call("/p/README.md", ReadSpan::Whole, Caller::Subagent),
+                ReadScreen::Allowed,
+            ),
+        ];
+        for (call, screen) in rows {
+            assert_eq!(read_screen(&call), screen, "{call:?}");
+        }
+    }
+
+    #[test]
+    fn when_judged_past_the_bound_then_it_is_denied_naming_the_file_as_one_shell_word() {
+        let past_bound = SUBAGENT_READ_LINES_MAX + 1;
+        let rows = [
+            ("/p/a.rs", "/p/a.rs"),
+            ("/p/my plan.rs", "'/p/my plan.rs'"),
+            ("/p/it's.rs", "'/p/it'\\''s.rs'"),
+            ("/p/$HOME.rs", "'/p/$HOME.rs'"),
+        ];
+        for (path, word) in rows {
+            let call = read_call(path, ReadSpan::Whole, Caller::Subagent);
+
+            let judged = read_verdict(&call, past_bound);
+
+            assert_eq!(judged, denied(Reader::WholeFileRead, word), "{path}");
+        }
+    }
+
+    #[test]
+    fn when_judged_at_or_under_the_bound_then_it_is_allowed() {
+        let call = read_call("/p/a.rs", ReadSpan::Whole, Caller::Subagent);
+        for line_count in [0, 1, SUBAGENT_READ_LINES_MAX] {
+            assert_eq!(
+                read_verdict(&call, line_count),
+                Verdict::Allow,
+                "{line_count}"
+            );
+        }
+    }
+}
+
+mod given_file_bytes {
+    use super::*;
+
+    #[test]
+    fn when_counted_then_a_last_line_without_a_newline_counts() {
+        let rows: [(&[u8], usize); 6] = [
+            (b"", 0),
+            (b"a", 1),
+            (b"a\n", 1),
+            (b"a\nb", 2),
+            (b"a\nb\n", 2),
+            (b"\n\n", 2),
+        ];
+        for (bytes, count) in rows {
+            assert_eq!(
+                line_count(bytes),
+                count,
+                "{}",
+                String::from_utf8_lossy(bytes)
+            );
+        }
+    }
+}
+
 mod given_a_hook_input {
     use super::*;
 
@@ -405,9 +501,60 @@ mod given_a_hook_input {
 
     #[test]
     fn when_read_from_another_tool_then_it_is_passed_over() {
-        let input = br#"{"tool_name":"Read","tool_input":{"file_path":"a.rs"}}"#;
+        let input = br#"{"tool_name":"Grep","tool_input":{"pattern":"plan","path":"a.rs"}}"#;
 
         assert_eq!(hook_input(input), Ok(HookInput::OtherTool));
+    }
+
+    #[test]
+    fn when_read_from_a_read_call_then_its_file_span_and_caller_are_returned() {
+        let rows: [(&[u8], ReadCall); 5] = [
+            (
+                br#"{"tool_name":"Read","tool_input":{"file_path":"/p/a.rs"},"agent_id":"a1","agent_type":"Explore"}"#,
+                read_call("/p/a.rs", ReadSpan::Whole, Caller::Subagent),
+            ),
+            (
+                br#"{"tool_name":"Read","tool_input":{"file_path":"/p/a.rs","offset":10}}"#,
+                read_call("/p/a.rs", ReadSpan::Ranged, Caller::MainThread),
+            ),
+            (
+                br#"{"tool_name":"Read","tool_input":{"file_path":"/p/a.rs","limit":40},"agent_id":"a1"}"#,
+                read_call("/p/a.rs", ReadSpan::Ranged, Caller::Subagent),
+            ),
+            (
+                br#"{"tool_name":"Read","tool_input":{"file_path":"/p/a.rs","offset":null,"limit":null},"agent_id":"a1"}"#,
+                read_call("/p/a.rs", ReadSpan::Whole, Caller::Subagent),
+            ),
+            (
+                br#"{"tool_name":"Read","tool_input":{"file_path":"/p/a.rs"},"agent_type":"reviewer"}"#,
+                read_call("/p/a.rs", ReadSpan::Whole, Caller::MainThread),
+            ),
+        ];
+        for (input, call) in rows {
+            assert_eq!(
+                hook_input(input),
+                Ok(HookInput::Read(call)),
+                "{}",
+                String::from_utf8_lossy(input)
+            );
+        }
+    }
+
+    #[test]
+    fn when_read_from_a_read_call_naming_no_file_then_the_missing_field_is_named() {
+        let inputs: [&[u8]; 3] = [
+            br#"{"tool_name":"Read"}"#,
+            br#"{"tool_name":"Read","tool_input":{}}"#,
+            br#"{"tool_name":"Read","tool_input":{"file_path":7}}"#,
+        ];
+        for input in inputs {
+            assert_eq!(
+                hook_input(input),
+                Err(HookInputFault::NoFilePath),
+                "{}",
+                String::from_utf8_lossy(input)
+            );
+        }
     }
 
     #[test]

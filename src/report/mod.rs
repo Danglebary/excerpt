@@ -432,6 +432,7 @@ pub fn guard_denial(denial: &Denial) -> String {
     let read = match denial.reader {
         Reader::SedRange => "a `sed -n` line-range read",
         Reader::AwkRange => "an `awk` line-number read",
+        Reader::WholeFileRead => "a subagent's whole-file Read",
         Reader::Head => "a `head` read",
         Reader::Tail => "a `tail` read",
         Reader::Cat => "a `cat` read",
@@ -460,6 +461,7 @@ pub fn hook_input_fault(fault: &HookInputFault) -> String {
         HookInputFault::NotJson(message) => format!("it is not JSON: {message}"),
         HookInputFault::NoToolName => "it holds no `tool_name`".to_owned(),
         HookInputFault::NoCommand => "a Bash call holds no `tool_input.command`".to_owned(),
+        HookInputFault::NoFilePath => "a Read call holds no `tool_input.file_path`".to_owned(),
     };
     format!("excerpt guard: the hook input is not what Claude Code sends: {detail}\n")
 }
