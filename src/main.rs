@@ -9,6 +9,7 @@ use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::ExitCode;
 
+use excerpt::brief;
 use excerpt::cli::{self, Command};
 use excerpt::exit_code;
 use excerpt::guard::{self, HOOK_INPUT_BYTES_MAX, HookInput, ReadCall, ReadScreen, Verdict};
@@ -44,6 +45,7 @@ fn main() -> ExitCode {
         Ok(Command::Outline { paths }) => run_outline(&paths),
         Ok(Command::Show { name, all, paths }) => run_show(&name, all, &paths),
         Ok(Command::Guard) => run_guard(),
+        Ok(Command::Brief) => run_brief(),
         Err(fault) => emit("", &report::usage_fault(&fault), exit_code::USAGE),
     };
     ExitCode::from(code)
@@ -236,6 +238,15 @@ fn run_guard() -> u8 {
         Verdict::Allow => exit_code::SUCCESS,
         Verdict::Deny(denial) => emit("", &report::guard_denial(&denial), exit_code::HOOK_BLOCK),
     }
+}
+
+/// The Claude Code `SubagentStart` hook: prints the context every subagent starts with.
+/// The hook's input on stdin is left unread, since the context is the same for every
+/// subagent.
+fn run_brief() -> u8 {
+    let context = report::subagent_brief();
+    let output = brief::hook_output(&context);
+    emit(&output, "", exit_code::SUCCESS)
 }
 
 /// Judges a Read call, counting its file's lines where the count decides it. A file that

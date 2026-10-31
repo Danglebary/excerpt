@@ -441,7 +441,69 @@ mod given_a_usage_fault {
     fn when_the_command_is_unknown_then_every_command_is_named() {
         assert_eq!(
             usage_fault(&UsageFault::UnknownCommand("find".to_owned())),
-            "excerpt: `find` is not a command; the commands are outline, show, and guard\nRun `excerpt --help` for the grammar.\n"
+            "excerpt: `find` is not a command; the commands are outline, show, guard, and brief\nRun `excerpt --help` for the grammar.\n"
+        );
+    }
+
+    #[test]
+    fn when_brief_is_given_an_argument_then_the_message_says_it_takes_none() {
+        assert_eq!(
+            usage_fault(&UsageFault::BriefArgument("Explore".to_owned())),
+            "excerpt: brief takes no arguments, and `Explore` is one\nRun `excerpt --help` for the grammar.\n"
+        );
+    }
+}
+
+mod given_the_subagent_brief {
+    use super::*;
+    use crate::brief::ADDITIONAL_CONTEXT_CHARACTERS_MAX;
+    use crate::cli::{Command, parse_arguments};
+
+    #[test]
+    fn when_rendered_then_it_names_the_item_commands_and_the_reads_the_guard_refuses() {
+        let brief = subagent_brief();
+
+        let expected = format!(
+            "Read Rust and TypeScript code (.rs, .ts, .mts, .cts, or .tsx) by item with excerpt:\n\
+             \x20 excerpt outline PATH\n\
+             \x20 excerpt show NAME [PATH]\n\
+             `outline` lists every item in a file, or in each source file under a directory, \
+             with the lines it spans; `show` prints the one NAME names, whole, NAME written as \
+             the outline prints it. The excerpt plugin's hook refuses printing these files' \
+             lines from Bash through a `sed -n` line range, `awk` line numbers, `head`, `tail`, \
+             or `cat`, and refuses a Read of one past {SUBAGENT_READ_LINES_MAX} lines that \
+             names no offset or limit. A line no item holds, such as an import or the line a \
+             compiler error names, is read with the Read tool's offset and limit.\n"
+        );
+        assert_eq!(brief, expected);
+    }
+
+    #[test]
+    fn when_rendered_then_every_command_it_offers_parses_against_the_grammar() {
+        let brief = subagent_brief();
+
+        let offered: Vec<Vec<String>> = brief
+            .lines()
+            .filter_map(|line| line.strip_prefix("  excerpt "))
+            .map(|arguments| arguments.split_whitespace().map(str::to_owned).collect())
+            .collect();
+        assert_eq!(offered.len(), 2, "{brief}");
+        for arguments in &offered {
+            let parsed = parse_arguments(arguments);
+            assert!(parsed.is_ok(), "{arguments:?}");
+            if let Ok(Command::Show { name, .. }) = parsed {
+                assert!(crate::query::parse(&name).is_ok(), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn when_rendered_then_claude_code_adds_it_to_the_context_whole() {
+        let characters = subagent_brief().chars().count();
+
+        assert!(
+            characters <= ADDITIONAL_CONTEXT_CHARACTERS_MAX,
+            "{characters}"
         );
     }
 }

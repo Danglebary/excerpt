@@ -693,3 +693,25 @@ mod given_guard {
         );
     }
 }
+
+mod given_brief {
+    use super::*;
+
+    #[test]
+    fn when_run_then_it_prints_the_subagent_start_context_and_exits_0() {
+        let scratch = Scratch::new();
+
+        let (code, stdout, stderr) = run(&scratch, &["brief"]);
+
+        assert_eq!((code, stderr.as_str()), (0, ""));
+        let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(
+            output["hookSpecificOutput"]["hookEventName"],
+            "SubagentStart"
+        );
+        assert_eq!(
+            output["hookSpecificOutput"]["additionalContext"],
+            excerpt::report::subagent_brief()
+        );
+    }
+}

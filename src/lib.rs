@@ -4,6 +4,7 @@
 //! Nothing here reads a file, walks a directory, or reads the environment, so each rule is
 //! tested against strings; `main.rs` is the shell that does all of that.
 
+pub mod brief;
 pub mod cli;
 pub mod exit_code;
 pub mod guard;

@@ -8,7 +8,7 @@
     {
       "name": "excerpt",
       "source": "./claude-code/excerpt",
-      "description": "A skill teaching agents to read Rust and TypeScript by item with the excerpt binary, an outline of what a file or directory declares and one item printed whole by name, and a hook that blocks printing those files' lines through sed -n, head, tail, or cat."
+      "description": "A skill teaching agents to read Rust and TypeScript by item with the excerpt binary, an outline of what a file or directory declares and one item printed whole by name; a hook that blocks printing those files' lines through sed -n, awk, head, tail, or cat, and a subagent's whole-file Read of a long one; and a hook that gives each subagent that rule as it starts."
     }
   ]
 }
