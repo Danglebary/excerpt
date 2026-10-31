@@ -1,6 +1,6 @@
 {
   "name": "excerpt",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "A skill teaching agents to read Rust and TypeScript by item with the excerpt binary, an outline of what a file or directory declares and one item printed whole by name, and a hook that blocks printing those files' lines through sed -n, head, tail, or cat. Needs the excerpt binary on PATH.",
   "author": {
     "name": "Danglebary"
