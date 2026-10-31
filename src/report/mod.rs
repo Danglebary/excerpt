@@ -22,6 +22,8 @@ const _: () = assert!(
 const OUTLINE_INDENT: &str = "  ";
 /// The width a printed line's number is right-aligned to, the Read tool's.
 const LINE_NUMBER_WIDTH: usize = 6;
+/// What every refusal the hook writes opens with, ahead of the read it blocked.
+pub const GUARD_DENIAL_OPENING: &str = "excerpt guard: blocked ";
 
 /// The whole grammar, which is what an agent reads before its first call.
 pub const HELP: &str = "\
@@ -446,7 +448,7 @@ pub fn guard_denial(denial: &Denial) -> String {
     };
     let path = &denial.path;
     format!(
-        "excerpt guard: blocked {read} of {path}.\n\
+        "{GUARD_DENIAL_OPENING}{read} of {path}.\n\
          Read code by item instead:\n\
          \x20 excerpt outline {path}\n\
          \x20 excerpt show NAME {path}\n\

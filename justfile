@@ -24,14 +24,21 @@ malloc_tunables := "glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_thres
 excerpt *ARGS:
     @{{in_shell}} cargo run --quiet -- "$@"
 
+# The figures about the guard measured from this machine's Claude Code transcripts, by the
+# guard built from the tree, its arguments passed through whole: `just measure refusals
+# --since 2026-10-18T01:16:32Z`. It is built under the release profile, since a debug
+# build reads the store about six times slower.
+measure *ARGS:
+    @{{in_shell}} cargo run --quiet --release --package excerpt-measure -- "$@"
+
 # The gate: the Rust half, then Claude Code's validator over the marketplace and the
 # plugin.
 check: check-rust check-claude-code
 
 check-rust:
     {{in_shell}} cargo fmt --all --check
-    {{in_shell}} cargo clippy --all-targets -- -D warnings
-    {{in_shell}} cargo test
+    {{in_shell}} cargo clippy --workspace --all-targets -- -D warnings
+    {{in_shell}} cargo test --workspace
 
 # The validator is the `claude` on `PATH`: Claude Code is unfree in nixpkgs, so the
 # flake carries none.

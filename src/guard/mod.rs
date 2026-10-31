@@ -155,25 +155,17 @@ fn bash_command(value: &serde_json::Value) -> Result<String, HookInputFault> {
 }
 
 /// The file a Read call's input names, how much of it, and whether a subagent makes it.
-/// A null `offset` or `limit` names none.
 fn read_call(value: &serde_json::Value) -> Result<ReadCall, HookInputFault> {
-    let tool_input = value.get("tool_input");
-    let path = tool_input
-        .and_then(|tool_input| tool_input.get("file_path"))
-        .and_then(serde_json::Value::as_str);
-    let Some(path) = path else {
+    let Some(tool_input) = value.get("tool_input") else {
         return Err(HookInputFault::NoFilePath);
     };
-    let names = |field: &str| {
-        tool_input
-            .and_then(|tool_input| tool_input.get(field))
-            .is_some_and(|named| !named.is_null())
+    let Some(path) = tool_input
+        .get("file_path")
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Err(HookInputFault::NoFilePath);
     };
-    let span = if names("offset") || names("limit") {
-        ReadSpan::Ranged
-    } else {
-        ReadSpan::Whole
-    };
+    let span = read_span(tool_input);
     let caller = match value.get("agent_id").and_then(serde_json::Value::as_str) {
         Some(_) => Caller::Subagent,
         None => Caller::MainThread,
@@ -183,6 +175,19 @@ fn read_call(value: &serde_json::Value) -> Result<ReadCall, HookInputFault> {
         span,
         caller,
     })
+}
+
+/// How much of its file a Read takes, from the call's input: lines where it names an
+/// `offset` or a `limit`, and the whole file where it names neither. A null `offset` or
+/// `limit` names none.
+#[must_use]
+pub fn read_span(tool_input: &serde_json::Value) -> ReadSpan {
+    let names = |field: &str| tool_input.get(field).is_some_and(|named| !named.is_null());
+    if names("offset") || names("limit") {
+        ReadSpan::Ranged
+    } else {
+        ReadSpan::Whole
+    }
 }
 
 /// Judges one Bash command as the hook receives it: the first reader in it that prints a

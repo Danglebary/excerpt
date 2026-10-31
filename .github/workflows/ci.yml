@@ -25,9 +25,9 @@ jobs:
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
-        run: cargo clippy --locked --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --locked
+        run: cargo test --locked --workspace
 
   # The musl target, whose code `check` never compiles: on musl the binary takes mimalloc
   # as its allocator, so the lints and the tests run for that target too.
@@ -46,9 +46,9 @@ jobs:
       - name: Add the target
         run: rustup target add x86_64-unknown-linux-musl
       - name: Clippy
-        run: cargo clippy --locked --all-targets --target x86_64-unknown-linux-musl -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --target x86_64-unknown-linux-musl -- -D warnings
       - name: Test
-        run: cargo test --locked --target x86_64-unknown-linux-musl
+        run: cargo test --locked --workspace --target x86_64-unknown-linux-musl
 
   # The flake's package, built inside the Nix sandbox from the file set `flake.nix`
   # lists, where `check` builds from the whole checkout.
