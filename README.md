@@ -49,14 +49,16 @@ curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/Danglebar
 
 It installs to `~/.local/bin`, or to `$EXCERPT_INSTALL_DIR`. With Nix, `nix profile install github:Danglebary/excerpt`; with cargo, `cargo install --locked --git https://github.com/Danglebary/excerpt`.
 
-The Claude Code plugin, once the binary is on `PATH`, adds a skill that teaches agents both commands and a hook that holds them to it:
+The Claude Code plugin, once the binary is on `PATH`, adds a skill that teaches agents both commands and two hooks that hold them to it:
 
 ```
 /plugin marketplace add Danglebary/excerpt
 /plugin install excerpt@excerpt
 ```
 
-The hook runs `excerpt guard` before every Bash call. It blocks a command that prints lines of a file excerpt reads through a `sed -n` line range, `awk` line numbers, `head`, `tail`, or `cat`, and its refusal hands the agent the `outline` and `show` commands for that file. A `sed -n` range bounded by a pattern, `/fn plan/,/^}/p`, counts as a line range. Standard input, the lines a single pattern matches, output redirected to a file, and every other kind of file pass. The hook also blocks a subagent's Read of such a file past 300 lines that names no `offset` or `limit`, pointing it at the same commands; the main thread's Reads, and a subagent's Reads of shorter files or of a range, pass. Without the binary on `PATH` every Bash call reports a non-blocking hook error, which is the signal to install it.
+The first hook runs `excerpt guard` before every Bash and Read call. It blocks a command that prints lines of a file excerpt reads through a `sed -n` line range, `awk` line numbers, `head`, `tail`, or `cat`, and its refusal hands the agent the `outline` and `show` commands for that file. A `sed -n` range bounded by a pattern, `/fn plan/,/^}/p`, counts as a line range. Standard input, the lines a single pattern matches, output redirected to a file, and every other kind of file pass. The hook also blocks a subagent's Read of such a file past 300 lines that names no `offset` or `limit`, pointing it at the same commands; the main thread's Reads, and a subagent's Reads of shorter files or of a range, pass. Without the binary on `PATH` every Bash call reports a non-blocking hook error, which is the signal to install it.
+
+The second hook runs `excerpt brief` as each subagent starts. It adds both commands and the reads the first hook refuses to the subagent's context, before its first prompt, so a subagent meets the rule before its first read.
 
 ## Exit status
 
@@ -67,7 +69,7 @@ The hook runs `excerpt guard` before every Bash call. It blocks a command that p
 | 2 | the arguments are malformed |
 | 3 | reading a path failed; what was printed may be incomplete |
 
-`excerpt guard` speaks Claude Code's hook codes instead: 0 lets the command run, 2 blocks it, and 1 reports a hook input it cannot read without blocking the command.
+`excerpt guard` speaks Claude Code's hook codes instead: 0 lets the command run, 2 blocks it, and 1 reports a hook input it cannot read without blocking the command. `excerpt brief` exits 0 once its JSON is printed.
 
 ## Development
 

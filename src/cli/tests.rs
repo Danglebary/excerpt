@@ -138,3 +138,20 @@ mod given_guard {
         );
     }
 }
+
+mod given_brief {
+    use super::*;
+
+    #[test]
+    fn when_parsed_alone_then_it_is_the_subagent_hook_command() {
+        assert_eq!(parsed(&["brief"]), Ok(Command::Brief));
+    }
+
+    #[test]
+    fn when_parsed_holding_an_argument_then_it_is_refused() {
+        assert_eq!(
+            parsed(&["brief", "Explore"]),
+            Err(UsageFault::BriefArgument("Explore".to_owned()))
+        );
+    }
+}

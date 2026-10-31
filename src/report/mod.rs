@@ -4,7 +4,7 @@
 use std::ops::ControlFlow;
 
 use crate::cli::UsageFault;
-use crate::guard::{Denial, HookInputFault, Reader};
+use crate::guard::{Denial, HookInputFault, Reader, SUBAGENT_READ_LINES_MAX};
 use crate::item::{Item, Outline};
 use crate::language::{EXTENSIONS, Language};
 use crate::query::QueryFault;
@@ -37,10 +37,13 @@ Usage:
       line numbered. Refused when no item answers NAME, or when several do and --all is
       absent; the refusal lists them. --all prints every match, up to 20.
   excerpt guard
-      The Claude Code hook the plugin runs before each Bash call. Reads the hook's input
-      on stdin and blocks a command that prints lines of a file excerpt reads through
-      `sed -n` line numbers, `head`, `tail`, or `cat`, offering outline and show in its
-      place.
+      The Claude Code hook the plugin runs before each Bash and Read call. Reads the
+      hook's input on stdin and blocks printing lines of a file excerpt reads through a
+      `sed -n` line range, `awk` line numbers, `head`, `tail`, or `cat`, or a subagent's
+      whole-file Read of a long one, offering outline and show in its place.
+  excerpt brief
+      The Claude Code hook the plugin runs as each subagent starts. Prints the JSON that
+      adds the rule on reading code by item to the subagent's context.
 
 NAME is an item's name, optionally qualified by the items it sits in and led by its
 kind, exactly as an outline prints it after the line numbers:
@@ -59,7 +62,8 @@ Exit status:
   2  the arguments are malformed
   3  reading a path failed; what was printed may be incomplete
 guard speaks Claude Code's hook codes instead: 0 lets the command run, 2 blocks it,
-and 1 reports a hook input it cannot read without blocking the command.
+and 1 reports a hook input it cannot read without blocking the command. brief exits 0
+once its JSON is printed.
 ";
 
 /// One item's line in an outline or a refusal: `src/plan.rs:104-180 fn plan`.
@@ -370,14 +374,17 @@ pub fn skipped(path: &str, entry: &Entry<'_>) -> String {
 #[must_use]
 pub fn usage_fault(fault: &UsageFault) -> String {
     let problem = match fault {
-        UsageFault::MissingCommand => "name a command: outline, show, or guard".to_owned(),
+        UsageFault::MissingCommand => "name a command: outline, show, guard, or brief".to_owned(),
         UsageFault::UnknownCommand(word) => {
-            format!("`{word}` is not a command; the commands are outline, show, and guard")
+            format!("`{word}` is not a command; the commands are outline, show, guard, and brief")
         }
         UsageFault::UnknownFlag(flag) => format!("`{flag}` is not a flag excerpt takes"),
         UsageFault::MissingName => "show needs the name of the item to print".to_owned(),
         UsageFault::GuardArgument(word) => {
             format!("guard takes no arguments, and `{word}` is one")
+        }
+        UsageFault::BriefArgument(word) => {
+            format!("brief takes no arguments, and `{word}` is one")
         }
     };
     format!("excerpt: {problem}\nRun `excerpt --help` for the grammar.\n")
@@ -447,6 +454,25 @@ pub fn guard_denial(denial: &Denial) -> String {
          one NAME names, whole, NAME written as the outline prints it. A line no item \
          holds, such as an import or the line a compiler error names, is read with the Read \
          tool's offset and limit.\n"
+    )
+}
+
+/// What a subagent's context begins with, before its first prompt: the item commands, the
+/// reads the guard refuses, and the read that serves a line no item holds.
+#[must_use]
+pub fn subagent_brief() -> String {
+    let extensions = extension_list();
+    format!(
+        "Read Rust and TypeScript code ({extensions}) by item with excerpt:\n\
+         \x20 excerpt outline PATH\n\
+         \x20 excerpt show NAME [PATH]\n\
+         `outline` lists every item in a file, or in each source file under a directory, \
+         with the lines it spans; `show` prints the one NAME names, whole, NAME written as \
+         the outline prints it. The excerpt plugin's hook refuses printing these files' \
+         lines from Bash through a `sed -n` line range, `awk` line numbers, `head`, `tail`, \
+         or `cat`, and refuses a Read of one past {SUBAGENT_READ_LINES_MAX} lines that names \
+         no offset or limit. A line no item holds, such as an import or the line a compiler \
+         error names, is read with the Read tool's offset and limit.\n"
     )
 }
 
