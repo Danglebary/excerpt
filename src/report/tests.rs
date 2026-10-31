@@ -355,6 +355,7 @@ mod given_a_guard_denial {
         let rows = [
             (Reader::SedRange, "a `sed -n` line-range read"),
             (Reader::AwkRange, "an `awk` line-number read"),
+            (Reader::WholeFileRead, "a subagent's whole-file Read"),
             (Reader::Head, "a `head` read"),
             (Reader::Tail, "a `tail` read"),
             (Reader::Cat, "a `cat` read"),
@@ -410,6 +411,10 @@ mod given_a_hook_input_it_cannot_use {
             (
                 HookInputFault::NoCommand,
                 "a Bash call holds no `tool_input.command`",
+            ),
+            (
+                HookInputFault::NoFilePath,
+                "a Read call holds no `tool_input.file_path`",
             ),
         ];
         for (fault, detail) in rows {

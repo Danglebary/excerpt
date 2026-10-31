@@ -1,9 +1,9 @@
 {
-  "description": "Blocks a Bash command that prints lines of a Rust or TypeScript file through a sed -n line range, awk line numbers, head, tail, or cat, and hands the agent the excerpt outline and show commands for that file in its place.",
+  "description": "Blocks a Bash command that prints lines of a Rust or TypeScript file through a sed -n line range, awk line numbers, head, tail, or cat, and a subagent's Read of such a file past 300 lines naming no offset or limit, and hands the agent the excerpt outline and show commands for that file in its place.",
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|Read",
         "hooks": [
           {
             "type": "command",

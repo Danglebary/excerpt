@@ -8,10 +8,11 @@ use std::fs;
 
 use excerpt::parallel::{ATTEMPT_INPUT_BYTES_MAX, WORKERS_MAX};
 use excerpt::report::{LISTED_MATCHES_MAX, OUTLINE_ITEMS_MAX};
-use support::{Scratch, bash_call, run, run_with_input};
+use support::{Scratch, bash_call, lines, read_call, run, run_with_input};
 
 #[cfg(test)]
 mod support {
+    use std::fmt::Write as _;
     use std::fs;
     use std::io::Write as _;
     use std::path::PathBuf;
@@ -93,6 +94,31 @@ mod support {
             "tool_name": "Bash",
             "tool_input": { "command": command, "description": "a call" },
         });
+        serde_json::to_vec(&input).unwrap()
+    }
+
+    /// A file of `line_count` lines, each one item's worth of text.
+    pub fn lines(line_count: usize) -> String {
+        let mut text = String::new();
+        for index in 0..line_count {
+            writeln!(text, "const LINE_{index}: u8 = 0;").unwrap();
+        }
+        text
+    }
+
+    /// The input Claude Code hands a `PreToolUse` hook for a Read of `path` naming no
+    /// `offset` or `limit`, made inside the subagent `agent_id` names or on the main thread.
+    pub fn read_call(path: &str, agent_id: Option<&str>) -> Vec<u8> {
+        let mut input = serde_json::json!({
+            "session_id": "session",
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Read",
+            "tool_input": { "file_path": path },
+        });
+        if let Some(agent_id) = agent_id {
+            input["agent_id"] = serde_json::json!(agent_id);
+            input["agent_type"] = serde_json::json!("Explore");
+        }
         serde_json::to_vec(&input).unwrap()
     }
 }
@@ -552,7 +578,7 @@ mod given_another_c_library {
 
 mod given_guard {
     use super::*;
-    use excerpt::guard::HOOK_INPUT_BYTES_MAX;
+    use excerpt::guard::{HOOK_INPUT_BYTES_MAX, SUBAGENT_READ_LINES_MAX};
 
     #[test]
     fn when_the_command_prints_source_lines_then_it_exits_2_with_the_refusal_on_stderr() {
@@ -586,11 +612,56 @@ mod given_guard {
     #[test]
     fn when_the_call_is_another_tool_s_then_it_exits_0_printing_nothing() {
         let scratch = Scratch::new();
-        let input = br#"{"tool_name":"Read","tool_input":{"file_path":"src/plan.rs"}}"#;
+        let input = br#"{"tool_name":"Grep","tool_input":{"pattern":"plan","path":"src/plan.rs"}}"#;
 
         let (code, stdout, stderr) = run_with_input(&scratch, &["guard"], input);
 
         assert_eq!((code, stdout.as_str(), stderr.as_str()), (0, "", ""));
+    }
+
+    #[test]
+    fn when_a_subagent_reads_a_code_file_past_the_bound_whole_then_it_exits_2_with_the_refusal() {
+        let scratch = Scratch::new();
+        scratch.write("long.rs", &lines(SUBAGENT_READ_LINES_MAX + 1));
+        let path = scratch.root.join("long.rs").to_string_lossy().into_owned();
+
+        let (code, stdout, stderr) =
+            run_with_input(&scratch, &["guard"], &read_call(&path, Some("agent")));
+
+        assert_eq!(code, 2);
+        assert_eq!(stdout, "");
+        let headline = format!("excerpt guard: blocked a subagent's whole-file Read of {path}.\n");
+        assert!(stderr.starts_with(&headline), "{stderr}");
+    }
+
+    #[test]
+    fn when_a_whole_read_is_one_the_bound_lets_through_then_it_exits_0_printing_nothing() {
+        let scratch = Scratch::new();
+        scratch.write("short.rs", &lines(SUBAGENT_READ_LINES_MAX));
+        scratch.write("long.rs", &lines(SUBAGENT_READ_LINES_MAX + 1));
+        let short = scratch.root.join("short.rs").to_string_lossy().into_owned();
+        let long = scratch.root.join("long.rs").to_string_lossy().into_owned();
+        let missing = scratch
+            .root
+            .join("missing.rs")
+            .to_string_lossy()
+            .into_owned();
+        let calls = [
+            read_call(&short, Some("agent")),
+            read_call(&long, None),
+            read_call(&missing, Some("agent")),
+        ];
+
+        for call in calls {
+            let (code, stdout, stderr) = run_with_input(&scratch, &["guard"], &call);
+
+            assert_eq!(
+                (code, stdout.as_str(), stderr.as_str()),
+                (0, "", ""),
+                "{}",
+                String::from_utf8_lossy(&call)
+            );
+        }
     }
 
     #[test]

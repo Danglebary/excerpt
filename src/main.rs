@@ -11,7 +11,7 @@ use std::process::ExitCode;
 
 use excerpt::cli::{self, Command};
 use excerpt::exit_code;
-use excerpt::guard::{self, HOOK_INPUT_BYTES_MAX, HookInput, Verdict};
+use excerpt::guard::{self, HOOK_INPUT_BYTES_MAX, HookInput, ReadCall, ReadScreen, Verdict};
 use excerpt::item::{self, Outline};
 use excerpt::language::Language;
 use excerpt::parallel::{self, ATTEMPT_INPUT_BYTES_MAX, Attempt, Pool, Work};
@@ -211,9 +211,9 @@ fn read_bounded(source: impl Read, bytes_max: u64) -> io::Result<Bounded> {
     Ok(Bounded::Bytes(buffer))
 }
 
-/// The Claude Code hook: judges the Bash call on stdin and exits with the code the hook
-/// contract gives the verdict. An input it cannot use is reported without blocking, so a
-/// change in what Claude Code sends never stops every Bash call.
+/// The Claude Code hook: judges the Bash or Read call on stdin and exits with the code the
+/// hook contract gives the verdict. An input it cannot use is reported without blocking,
+/// so a change in what Claude Code sends never stops every call.
 fn run_guard() -> u8 {
     let input = match read_bounded(io::stdin().lock(), HOOK_INPUT_BYTES_MAX) {
         Ok(Bounded::Bytes(input)) => input,
@@ -226,15 +226,44 @@ fn run_guard() -> u8 {
             return emit("", &message, exit_code::HOOK_ERROR);
         }
     };
-    let command = match guard::hook_input(&input) {
-        Ok(HookInput::Bash(command)) => command,
+    let verdict = match guard::hook_input(&input) {
+        Ok(HookInput::Bash(command)) => guard::verdict(&command),
+        Ok(HookInput::Read(call)) => judge_read(&call),
         Ok(HookInput::OtherTool) => return exit_code::SUCCESS,
         Err(fault) => return emit("", &report::hook_input_fault(&fault), exit_code::HOOK_ERROR),
     };
-    match guard::verdict(&command) {
+    match verdict {
         Verdict::Allow => exit_code::SUCCESS,
         Verdict::Deny(denial) => emit("", &report::guard_denial(&denial), exit_code::HOOK_BLOCK),
     }
+}
+
+/// Judges a Read call, counting its file's lines where the count decides it. A file that
+/// cannot be read is let through, since the Read itself reports why.
+fn judge_read(call: &ReadCall) -> Verdict {
+    match guard::read_screen(call) {
+        ReadScreen::Allowed => Verdict::Allow,
+        ReadScreen::LineCountDecides => match count_lines(&call.path) {
+            Ok(line_count) => guard::read_verdict(call, line_count),
+            Err(_) => Verdict::Allow,
+        },
+    }
+}
+
+/// The lines of the file at `path` within its first `FILE_BYTES_MAX` bytes, which hold
+/// every line of any file excerpt reads.
+fn count_lines(path: &str) -> io::Result<usize> {
+    let file = fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(FILE_BYTES_MAX).read_to_end(&mut bytes)?;
+    let Ok(read_bytes) = u64::try_from(bytes.len()) else {
+        unreachable!("a buffer's length fits a u64");
+    };
+    assert!(
+        read_bytes <= FILE_BYTES_MAX,
+        "a bounded read holds no more than its bound"
+    );
+    Ok(guard::line_count(&bytes))
 }
 
 /// One source file read and its text handed to `use_text`, or why it has no text.

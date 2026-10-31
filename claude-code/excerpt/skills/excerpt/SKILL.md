@@ -9,7 +9,7 @@ description: Read Rust and TypeScript code by item with `excerpt` instead of `gr
 
 Reach for it whenever the thing to read is a declaration in a `.rs`, `.ts`, `.mts`, `.cts`, or `.tsx` file. Text search across files stays with `rg`, and a file that is not code, such as Markdown, TOML, or JSON, stays with the Read tool.
 
-The plugin's hook blocks printing lines of these files from Bash through a `sed -n` line range, `awk` line numbers, `head`, `tail`, or `cat`, and its refusal names the `outline` and `show` commands for the file. A line that belongs to no item, such as an import or the line a compiler error names, is read with the Read tool's offset and limit.
+The plugin's hook blocks printing lines of these files from Bash through a `sed -n` line range, `awk` line numbers, `head`, `tail`, or `cat`, and blocks a subagent's Read of one past 300 lines that names no `offset` or `limit`; its refusal names the `outline` and `show` commands for the file. A line that belongs to no item, such as an import or the line a compiler error names, is read with the Read tool's offset and limit.
 
 ## Survey: outline
 
