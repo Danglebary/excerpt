@@ -1,0 +1,25 @@
+[package]
+name = "excerpt-measure"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+description = "Figures about excerpt's guard, computed from Claude Code's transcripts"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Danglebary/excerpt"
+publish = false
+
+[dependencies]
+# The guard's verdicts, its bound, and the languages it reads, at the commit being built,
+# so a figure and the verdicts it counts come from one tree.
+excerpt = { path = ".." }
+# Claude Code's transcripts: finding them, reading their lines under bounds, reading each
+# line into a record, and pairing each tool call with its result.
+claude-code-transcript = { git = "https://github.com/Danglebary/claude-code-transcript", tag = "v0.1.0" }
+# The instants a record carries and a window names. Parsing one needs no time zone
+# database, so the default features, which bundle one, are off.
+jiff = { version = "0.2.38", default-features = false, features = ["std"] }
+# A tool call's input is JSON, its fields each tool's own.
+serde_json = "1.0.152"
+
+[lints]
+workspace = true

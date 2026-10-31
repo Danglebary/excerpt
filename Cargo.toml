@@ -9,6 +9,13 @@ description = "Prints a source file's outline, or one of its items whole by name
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Danglebary/excerpt"
 
+# The binary's crate stands at the workspace's root, so a cargo command run here builds,
+# tests, and releases it alone unless it is told `--workspace`.
+# https://doc.rust-lang.org/cargo/reference/workspaces.html#the-default-members-field
+# — checked 2026-10-30
+[workspace]
+members = ["measure"]
+
 [dependencies]
 # ripgrep's directory walker, which skips what `.gitignore` and hidden paths name the way
 # git does; reimplementing those rules is the part a hand-rolled walk gets wrong.
@@ -58,14 +65,17 @@ harness = false
 name = "process"
 harness = false
 
-[lints.rust]
+[lints]
+workspace = true
+
+[workspace.lints.rust]
 unsafe_code = "forbid"
 
 # A programmer error crashes, and it crashes through `assert!` or `unreachable!` with
 # a message at the site, so a failure names what it found rather than where it fell:
 # `unwrap`, `expect`, and a bare `panic!` are denied, and so are the implicit panics of
 # indexing, slicing, and arithmetic, which carry no message.
-[lints.clippy]
+[workspace.lints.clippy]
 pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 unwrap_used = "deny"

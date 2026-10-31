@@ -460,6 +460,31 @@ mod given_a_read_call {
             );
         }
     }
+
+    #[test]
+    fn when_its_span_is_read_then_a_named_offset_or_limit_ranges_it_and_a_null_names_none() {
+        let rows = [
+            (
+                serde_json::json!({ "file_path": "/p/a.rs" }),
+                ReadSpan::Whole,
+            ),
+            (
+                serde_json::json!({ "file_path": "/p/a.rs", "offset": 10 }),
+                ReadSpan::Ranged,
+            ),
+            (
+                serde_json::json!({ "file_path": "/p/a.rs", "limit": 5 }),
+                ReadSpan::Ranged,
+            ),
+            (
+                serde_json::json!({ "file_path": "/p/a.rs", "offset": null, "limit": null }),
+                ReadSpan::Whole,
+            ),
+        ];
+        for (tool_input, span) in rows {
+            assert_eq!(read_span(&tool_input), span, "{tool_input}");
+        }
+    }
 }
 
 mod given_file_bytes {

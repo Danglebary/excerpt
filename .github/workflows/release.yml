@@ -28,7 +28,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "excerpt") | .version')
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if gh release view "v$version" > /dev/null 2>&1; then
             echo "unreleased=false" >> "$GITHUB_OUTPUT"
