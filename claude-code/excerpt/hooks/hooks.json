@@ -1,5 +1,5 @@
 {
-  "description": "Blocks a Bash command that prints lines of a Rust or TypeScript file through sed -n line numbers, head, tail, or cat, and hands the agent the excerpt outline and show commands for that file in its place.",
+  "description": "Blocks a Bash command that prints lines of a Rust or TypeScript file through a sed -n line range, awk line numbers, head, tail, or cat, and hands the agent the excerpt outline and show commands for that file in its place.",
   "hooks": {
     "PreToolUse": [
       {

@@ -354,6 +354,7 @@ mod given_a_guard_denial {
     fn when_rendered_for_each_reader_then_it_names_that_reader() {
         let rows = [
             (Reader::SedRange, "a `sed -n` line-range read"),
+            (Reader::AwkRange, "an `awk` line-number read"),
             (Reader::Head, "a `head` read"),
             (Reader::Tail, "a `tail` read"),
             (Reader::Cat, "a `cat` read"),

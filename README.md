@@ -56,7 +56,7 @@ The Claude Code plugin, once the binary is on `PATH`, adds a skill that teaches 
 /plugin install excerpt@excerpt
 ```
 
-The hook runs `excerpt guard` before every Bash call. It blocks a command that prints lines of a file excerpt reads through `sed -n` line numbers, `head`, `tail`, or `cat`, and its refusal hands the agent the `outline` and `show` commands for that file. Standard input, pattern prints, output redirected to a file, and every other kind of file pass. Without the binary on `PATH` every Bash call reports a non-blocking hook error, which is the signal to install it.
+The hook runs `excerpt guard` before every Bash call. It blocks a command that prints lines of a file excerpt reads through a `sed -n` line range, `awk` line numbers, `head`, `tail`, or `cat`, and its refusal hands the agent the `outline` and `show` commands for that file. A `sed -n` range bounded by a pattern, `/fn plan/,/^}/p`, counts as a line range. Standard input, the lines a single pattern matches, output redirected to a file, and every other kind of file pass. Without the binary on `PATH` every Bash call reports a non-blocking hook error, which is the signal to install it.
 
 ## Exit status
 
