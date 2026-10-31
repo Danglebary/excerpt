@@ -6,7 +6,7 @@ edition = "2024"
 # pins rather than the floor a dependency declares.
 rust-version = "1.99"
 description = "Prints a source file's outline, or one of its items whole by name, so a reader never guesses a line range"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/Danglebary/excerpt"
 
 [dependencies]
