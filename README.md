@@ -41,7 +41,7 @@ excerpt reads `.rs`, `.ts`, `.mts`, `.cts`, and `.tsx`. A grammar is compiled in
 
 ## Install
 
-The binary, from the latest release (Linux and macOS, x86_64 and aarch64):
+The binary, from the latest release (Linux, x86_64 and aarch64):
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/Danglebary/excerpt/main/install.sh | sh
